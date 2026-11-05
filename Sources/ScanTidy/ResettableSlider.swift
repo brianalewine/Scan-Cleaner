@@ -7,24 +7,44 @@ struct ResettableSlider: View {
     let label: String
     var resetValue: Double = 0
     @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+    @GestureState private var isDragging = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var hasKeyboardFocus: Bool
 
     var body: some View {
         GeometryReader { geometry in
-            let travel = max(1, geometry.size.width - 6)
+            let thumbSize: CGFloat = 7
+            let travel = max(1, geometry.size.width - thumbSize)
             let fraction = min(1, max(0, (value - range.lowerBound) / (range.upperBound - range.lowerBound)))
             ZStack(alignment: .leading) {
-                Rectangle().fill(.primary.opacity(0.15)).frame(height: 2)
-                Rectangle().fill(Color.accentColor.opacity(0.7)).frame(width: 3 + travel * fraction, height: 2)
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(.primary.opacity(0.85)).frame(width: 6, height: 12)
+                Capsule()
+                    .fill(.primary.opacity(0.10))
+                    .frame(height: 4)
+                    .padding(.horizontal, thumbSize / 2)
+                Capsule()
+                    .fill(Color.accentColor.gradient)
+                    .frame(width: max(4, travel * fraction), height: 4)
+                    .offset(x: thumbSize / 2)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(LinearGradient(colors: [.white, Color(white: 0.86)], startPoint: .top, endPoint: .bottom))
+                    .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).strokeBorder(.primary.opacity(0.15), lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).strokeBorder(Color.accentColor.opacity(hasKeyboardFocus ? 0.85 : 0), lineWidth: 2))
+                    .shadow(color: .black.opacity(isDragging ? 0.22 : 0.14), radius: isDragging ? 3 : 1.5, y: 1)
+                    .frame(width: thumbSize, height: 18)
+                    .scaleEffect(isEnabled && (isHovering || isDragging) ? 1.12 : 1)
                     .offset(x: travel * fraction)
             }
             .frame(height: geometry.size.height)
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { event in
+            .onHover { isHovering = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovering)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isDragging)
+            .gesture(DragGesture(minimumDistance: 0)
+                .updating($isDragging) { _, dragging, _ in dragging = isEnabled }
+                .onChanged { event in
                 guard isEnabled else { return }
-                let fraction = min(1, max(0, (event.location.x - 3) / travel))
+                let fraction = min(1, max(0, (event.location.x - thumbSize / 2) / travel))
                 setValue(range.lowerBound + fraction * (range.upperBound - range.lowerBound))
             }.onEnded { _ in
                 hasKeyboardFocus = false
@@ -37,6 +57,7 @@ struct ResettableSlider: View {
         }
         .opacity(isEnabled ? 1 : 0.35)
         .focusable(isEnabled)
+        .focusEffectDisabled()
         .focused($hasKeyboardFocus)
         .onExitCommand { hasKeyboardFocus = false }
         .onChange(of: isEnabled) { _, enabled in

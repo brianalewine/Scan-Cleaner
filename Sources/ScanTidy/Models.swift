@@ -39,6 +39,8 @@ struct ScanPage: Codable, Identifiable {
     var isAdjusted: Bool { hasBeenEdited ?? (reviewed || edits != PageEdits()) }
 }
 struct LibraryState: Codable {
+    var pdfSettings: PDFSettings?
+    var bookInformation: BookInformation?
     var pages: [ScanPage] = []
     var selection: UUID?
     var spineDefaults: SpineSettings?

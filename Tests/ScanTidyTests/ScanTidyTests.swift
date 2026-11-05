@@ -4,6 +4,23 @@ import AppKit
 import SwiftUI
 
 final class ScanTidyTests: XCTestCase {
+    @MainActor func testMarkDoneAdvancesAndPersists() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let library = Library(root: root)
+        let pages = (0..<2).map { ScanPage(name: "\($0).png", storedFile: "\($0).png") }
+        library.state = LibraryState(pages: pages, selection: pages[0].id)
+        library.markNext()
+        XCTAssertTrue(library.state.pages[0].reviewed)
+        XCTAssertFalse(library.state.pages[1].reviewed)
+        XCTAssertEqual(library.state.selection, pages[1].id)
+        let restored = Library(root: root)
+        XCTAssertTrue(restored.state.pages[0].reviewed)
+        XCTAssertEqual(restored.state.selection, pages[1].id)
+        library.markNext()
+        XCTAssertTrue(library.state.pages[1].reviewed)
+        XCTAssertEqual(library.state.selection, pages[1].id)
+    }
+
     @MainActor func testThumbnailReflectsCropAndRotationAndUsesCache() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let library = Library(root: root)
@@ -59,7 +76,7 @@ final class ScanTidyTests: XCTestCase {
         XCTAssertEqual(result.edits.quarterTurns, 0)
     }
 
-    func testAutoCropPreservesRotationAndShadowAndLeavesBlankImageAlone() throws {
+    func testAutoCropPreservesRotationAndShadowAndTrimsBlankRotationBorders() throws {
         let blank = CIImage(color: CIColor.white).cropped(to: CGRect(x: 0, y: 0, width: 800, height: 1000))
         let source = try XCTUnwrap(Imaging.context.createCGImage(blank, from: blank.extent))
         var edits = PageEdits(); edits.angle = 1.5; edits.quarterTurns = 1
@@ -67,7 +84,7 @@ final class ScanTidyTests: XCTestCase {
         edits.spineSettings = SpineSettings(enabled: true)
         let result = Imaging.autoCrop(source, edits: edits)
         XCTAssertFalse(result.found)
-        XCTAssertEqual(result.edits, edits)
+        XCTAssertEqual(result.edits, Imaging.cropRotationBorders(source, edits: edits))
     }
 
     @MainActor func testReorderPreservesPageSettingsSelectionAndSavedOrder() throws {

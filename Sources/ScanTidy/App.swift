@@ -2,79 +2,146 @@ import SwiftUI
 import AppKit
 
 @main struct ScanTidyApp: App {
-    @NSApplicationDelegateAdaptor(ScanTidyAppDelegate.self) private var appDelegate
     @StateObject private var library = Library()
     var body: some Scene {
-        Window("Scan Tidy", id: "main") {
+        Window("Scan Cleaner", id: "main") {
             ContentView().environmentObject(library).frame(minWidth: 1000, minHeight: 680)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    library.save()
+                }
         }
         .defaultSize(width: 1320, height: 900)
+        .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) { Button("Import Scans…") { library.importScans() }.keyboardShortcut("o").disabled(library.busy) }
-            CommandGroup(replacing: .undoRedo) { Button("Undo Page Edit") { library.undo() }.keyboardShortcut("z").disabled(library.busy) }
-            CommandGroup(after: .undoRedo) {
-                Button("Cancel Line Straightening") { library.cancelStraightenLine() }
-                    .keyboardShortcut(.escape, modifiers: []).disabled(!library.drawingStraightenLine)
+            CommandGroup(replacing: .newItem) { Button("Import Scans…") { library.importScans() }.keyboardShortcut("o").disabled(library.busy || library.showingPDFExport) }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo Edit") { library.undo() }.keyboardShortcut("z").disabled(library.busy || library.showingPDFExport)
+                Button("Undo Edit (Control-Z)") { library.undo() }.keyboardShortcut("z", modifiers: .control).disabled(library.busy || library.showingPDFExport)
             }
-            CommandGroup(after: .saveItem) { Button("Export Cleaned Images…") { library.export() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(library.busy || library.state.pages.isEmpty) }
-        }
-    }
-}
-final class ScanTidyAppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let icon = NSImage(contentsOf: url) {
-            NSApplication.shared.applicationIconImage = icon
+            CommandGroup(after: .undoRedo) {
+                Button("Mark Done & Next") { library.markNext() }
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    .disabled(library.page == nil || library.busy || library.showingPDFExport)
+                Button("Stop Straightening") { library.cancelCurrentOperation() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .disabled(!library.batchRunning && !library.drawingStraightenLine)
+            }
+            CommandGroup(after: .saveItem) { Button("Export Cleaned Images…") { library.export() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(library.busy || library.state.pages.isEmpty || library.showingPDFExport) }
         }
     }
 }
 struct ContentView: View {
     @EnvironmentObject var library: Library
     @State private var showingDeleteConfirmation = false
+    @State private var showingInspector = true
+    @State private var showingSidebar = true
+    @StateObject private var backdrop = ScanBackdropState()
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                sidebar.frame(width: 215)
-                Divider()
+        Group {
+            if library.showingPDFExport {
+                PDFExportView()
+            } else {
+            GeometryReader { contentArea in
+            HSplitView {
+                if showingSidebar {
+                    sidebar.frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
+                }
                 VStack(spacing: 0) {
-                    HStack {
-                        Text(library.page?.name ?? "Your scan workspace").font(.headline).lineLimit(1)
-                        Spacer()
-                        Toggle("Grid", isOn: $library.grid).toggleStyle(.button)
-                        Toggle("Original", isOn: $library.showOriginal).toggleStyle(.button)
-                        Toggle("Crop preview", isOn: $library.croppedPreview).toggleStyle(.button)
-                    }.padding(14)
-                    ScanCanvas().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ScanCanvas(backdrop: backdrop).frame(maxWidth: .infinity, maxHeight: .infinity)
                     HStack {
                         Button { library.next(-1) } label: { Label("Previous", systemImage: "chevron.left") }.keyboardShortcut(.leftArrow, modifiers: [.command])
                             .disabled(library.index == nil || library.index == 0)
                         Spacer()
                         if let i = library.index { Text("\(i+1) / \(library.state.pages.count)").monospacedDigit().foregroundStyle(.secondary) }
                         Spacer()
-                        Button("Done & Next", systemImage: "checkmark.circle") { library.markNext() }.keyboardShortcut(.return, modifiers: [.command]).buttonStyle(.borderedProminent)
-                        Button { library.next(1) } label: { Image(systemName: "chevron.right") }.disabled(library.index == nil || library.index == library.state.pages.count-1)
-                    }.padding(14).disabled(library.page == nil || library.busy)
+                        Button("Mark Done & Next", systemImage: "checkmark.circle") { library.markNext() }
+                            .help("Mark this page as done, save it, and select the next page (Return)")
+                            .keyboardShortcut(.return, modifiers: []).scanProminentButton()
+                        Button { library.next(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next page").help("Next page (⌘→)").keyboardShortcut(.rightArrow, modifiers: [.command]).disabled(library.index == nil || library.index == library.state.pages.count-1)
+                    }.scanGlassButtons().padding(14).disabled(library.page == nil || library.busy)
                 }
-                Divider()
-                inspector.frame(width: 265)
+                .frame(minWidth: 420)
+                if showingInspector {
+                    inspector.frame(minWidth: 285, idealWidth: 310, maxWidth: 380)
+                }
             }
-            Divider()
-            HStack {
-                if library.busy { ProgressView().controlSize(.small) }
-                Text(library.status).lineLimit(1)
-                Spacer()
-                Label("Progress saved automatically", systemImage: "internaldrive").foregroundStyle(.secondary)
-            }.font(.caption).padding(.horizontal, 16).padding(.vertical, 9)
+            // An explicit viewport prevents descendant scroll views from
+            // expanding into the unified toolbar safe area. The small outer
+            // inset also keeps their scroll edges off the titlebar boundary.
+            .padding(.top, 1)
+            .frame(width: contentArea.size.width, height: contentArea.size.height)
+            .clipped()
+            }
+            .navigationTitle(library.page?.name ?? "Scan Cleaner")
+            }
         }
+        // Keep scrolling controls inside the content area below the titlebar.
+        .clipped()
+        .background {
+            SharedScanBackdrop(state: backdrop, image: library.showingPDFExport ? nil : library.preview)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) { Button("Import Scans", systemImage: "plus") { library.importScans() }.disabled(library.busy) }
-            ToolbarItem(placement: .primaryAction) { Button("Export Images", systemImage: "square.and.arrow.up") { library.export() }.disabled(library.busy || library.state.pages.isEmpty) }
+            ToolbarItem(placement: .navigation) {
+                Button("Pages", systemImage: "sidebar.left") { showingSidebar.toggle() }
+                    .help("Show or hide pages").disabled(library.showingPDFExport)
+            }
+            ToolbarItem(placement: .principal) {
+                // Center progress on the window, independently of the action group.
+                // Keep its width stable when progress appears or disappears.
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                        .opacity(library.busy ? 1 : 0)
+                    Text(library.busy || library.drawingStraightenLine ? library.status : "")
+                        .font(.caption).monospacedDigit().lineLimit(1)
+                    Button { library.stopStraightenAndCrop() } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop straightening and cropping (Esc)")
+                    .accessibilityLabel("Stop straightening and cropping")
+                    .disabled(!library.batchRunning)
+                    .opacity(library.batchRunning ? 1 : 0)
+                }
+                .frame(width: 280)
+                .opacity(library.busy || library.drawingStraightenLine ? 1 : 0)
+                .help(library.status)
+            }
+            if #available(macOS 26.0, *) {
+                // A real NSToolbar flexible space keeps the actions at the trailing edge.
+                ToolbarSpacer(.flexible, placement: .primaryAction)
+            } else {
+                ToolbarItem(placement: .primaryAction) { Spacer().frame(minWidth: 16) }
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Group {
+                Toggle(isOn: $library.grid) { Label("Grid", systemImage: "grid") }
+                    .help("Show alignment grid")
+                Toggle(isOn: $library.showOriginal) { Label("Original", systemImage: "doc") }
+                    .help("Show original scan")
+                Toggle(isOn: $library.croppedPreview) { Label("Crop preview", systemImage: "crop") }
+                    .help("Preview cropped page")
+            }
+            .toggleStyle(.button)
+            .disabled(library.page == nil || library.busy || library.showingPDFExport)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Adjustments", systemImage: "sidebar.right") { showingInspector.toggle() }
+                    .help("Show or hide adjustments")
+                    .disabled(library.showingPDFExport)
+            }
+            ToolbarItem(placement: .primaryAction) { Button("Import Scans", systemImage: "plus") { library.importScans() }.disabled(library.busy || library.showingPDFExport) }
+            ToolbarItem(placement: .primaryAction) { Button("Export Images", systemImage: "square.and.arrow.up") { library.export() }.disabled(library.busy || library.state.pages.isEmpty || library.showingPDFExport) }
+            ToolbarItem(placement: .primaryAction) { Button("PDF Export…", systemImage: "doc.richtext") { library.cancelStraightenLine(); library.showingPDFExport = true }.disabled(library.busy || !library.readyForPDF || library.showingPDFExport).help("Mark every page done to prepare a PDF") }
         }
-        .alert("Scan Tidy", isPresented: Binding(get: { library.error != nil }, set: { if !$0 { library.error = nil } })) { Button("OK") { library.error = nil } } message: { Text(library.error ?? "") }
+        .alert("Scan Cleaner", isPresented: Binding(get: { library.error != nil }, set: { if !$0 { library.error = nil } })) { Button("OK") { library.error = nil } } message: { Text(library.error ?? "") }
     }
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Text("PAGES").font(.caption.bold()); Spacer(); Text("\(library.state.pages.filter(\.reviewed).count) done").font(.caption).foregroundStyle(.secondary) }.padding(.horizontal, 15).padding(.top, 16)
+            HStack { Label("Pages", systemImage: "doc.on.doc").font(.headline); Spacer(); Text("\(library.state.pages.filter(\.reviewed).count) done").font(.caption).foregroundStyle(.secondary) }.padding(.horizontal, 15).padding(.top, 16)
             ScrollViewReader { proxy in
               List(selection: Binding(get: { library.state.selection }, set: { library.select($0) })) {
                 ForEach(Array(library.state.pages.enumerated()), id: \.element.id) { i, page in
@@ -92,7 +159,7 @@ struct ContentView: View {
                 .onMove { offsets, destination in
                     library.movePages(from: offsets, to: destination)
                 }
-              }.listStyle(.sidebar).disabled(library.busy)
+              }.listStyle(.sidebar).scrollContentBackground(.hidden).disabled(library.busy)
               .task {
                   // Wait for the native list to finish its initial layout.
                   await Task.yield()
@@ -117,6 +184,7 @@ struct ContentView: View {
             }
             Text("Drag pages to rearrange them. Scans are copied into your library. Original files stay untouched.").font(.caption).foregroundStyle(.secondary).padding(15)
         }
+        .scanGlassButtons()
     }
     func binding(_ key: WritableKeyPath<PageEdits, Double>) -> Binding<Double> {
         Binding(get: { library.edits[keyPath: key] }, set: { value in guard value.isFinite else { return }; var e = library.edits; e[keyPath: key] = key == \.angle ? min(12, max(-12, value)) : value; library.edit(e) })
@@ -140,55 +208,55 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("QUICK START").font(.caption.bold()).foregroundStyle(.secondary)
+                        Label("Adjustments", systemImage: "slider.horizontal.3").font(.headline)
                         Spacer()
                         Button("Reset") { library.resetPage() }.help("Reset all adjustments for this page (⌘Z to undo)")
                     }
-                    Button { library.autoAdjust() } label: {
+                    Button { library.straightenAndCropAll() } label: {
                         HStack {
                             Image(systemName: "wand.and.stars").frame(width: 18)
-                            Text("Suggest Crop & Angle")
+                            Text("Straighten & Crop All Pages")
                         }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    Button { library.straightenAll() } label: {
-                        HStack {
-                            Image(systemName: "text.alignleft").frame(width: 18)
-                            Text("Straighten All Pages")
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    Text("Check each suggestion. For pale page edges, adjust the blue crop lines yourself.").font(.caption).foregroundStyle(.secondary)
-                }
-                Divider()
+                    }.scanProminentButton().controlSize(.large)
+                    .help("Automatically straighten and crop pages without a green check. Undo reverts the entire run.")
+                    Text("Review each page after processing. Press ⌘Z or Control-Z to undo the entire run.").font(.caption).foregroundStyle(.secondary)
+                }.settingsSection()
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Straighten").font(.headline)
+                        Label("Straighten", systemImage: "rotate.right").font(.headline)
                         Spacer()
                         Button { var e = library.edits; e.quarterTurns = (e.quarterTurns+1)%4; library.edit(e) } label: { Image(systemName: "rotate.left") }.help("Rotate 90°")
                         Button { library.resetRotation() } label: { Image(systemName: "arrow.counterclockwise") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Reset this page's rotation").accessibilityLabel("Reset rotation")
+                            .foregroundStyle(.secondary).help("Reset this page's rotation").accessibilityLabel("Reset rotation")
                     }
                     HStack {
-                        Button("−") { var e = library.edits; e.angle = max(-12, e.angle-0.05); library.edit(e) }
-                        TextField("Angle", value: binding(\.angle), format: .number.precision(.fractionLength(2))).textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
-                        Text("°")
-                        Button("+") { var e = library.edits; e.angle = min(12, e.angle+0.05); library.edit(e) }
+                        HStack(spacing: 2) {
+                            TextField("Angle", value: binding(\.angle), format: .number.precision(.fractionLength(2)))
+                                .textFieldStyle(.plain).multilineTextAlignment(.trailing)
+                                .accessibilityLabel("Straighten angle in degrees")
+                            Text("°").accessibilityHidden(true)
+                        }
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(.secondary.opacity(0.3)))
                     }
                     ResettableSlider(value: binding(\.angle), range: -12...12, step: 0.05, label: "Straighten angle")
                         .frame(height: 20)
+                    Button("Auto Straighten Page", systemImage: "text.alignleft") { library.straightenPage() }
+                        .help("Automatically level the text on this page (⌘Z to undo)")
                     Button(library.drawingStraightenLine ? "Cancel Line (Esc)" : "Draw Line to Straighten", systemImage: "line.diagonal") {
                         if library.drawingStraightenLine { library.cancelStraightenLine() }
                         else { library.beginStraightenLine() }
                     }
                     Text("Click two points along a line of text to level it. Press Esc to cancel.").font(.caption).foregroundStyle(.secondary)
                     Text("Align a line of text with the grid.").font(.caption).foregroundStyle(.secondary)
-                }
-                Divider()
+                }.settingsSection()
                 VStack(alignment: .leading, spacing: 9) {
                     HStack {
-                        Text("Crop edges").font(.headline)
+                        Label("Crop edges", systemImage: "crop").font(.headline)
                         Spacer()
                         Button { library.resetCrop() } label: { Image(systemName: "arrow.counterclockwise") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Reset this page's crop").accessibilityLabel("Reset crop")
+                            .foregroundStyle(.secondary).help("Reset this page's crop").accessibilityLabel("Reset crop")
                     }
                     Button("Auto Detect Page Edges", systemImage: "viewfinder") { library.autoCrop() }
                     Text("Auto crop keeps the current rotation and looks for the page edge inside any visible stack of sheets.").font(.caption).foregroundStyle(.secondary)
@@ -197,8 +265,7 @@ struct ContentView: View {
                     cropSlider("Right", \.right, opposite: library.edits.left)
                     cropSlider("Top", \.top, opposite: library.edits.bottom)
                     cropSlider("Bottom", \.bottom, opposite: library.edits.top)
-                }
-                Divider()
+                }.settingsSection()
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Spine shadow", isOn: spineBinding(\.enabled)).font(.headline)
                     VStack(alignment: .leading, spacing: 8) {
@@ -206,11 +273,11 @@ struct ContentView: View {
                             Text("Left").tag(SpineSide.left)
                             Text("Right").tag(SpineSide.right)
                         }.pickerStyle(.segmented)
-                        HStack { Text("Width"); Spacer(); Text("\(Int(library.edits.spineSettings.width*100))% of page").monospacedDigit() }.font(.caption)
-                        ResettableSlider(value: spineBinding(\.width), range: 0.01...0.75, step: 0.01, label: "Spine width", resetValue: SpineSettings().width)
+                        HStack { Text("Width"); Spacer(); Text("\(library.edits.spineSettings.width*100, specifier: "%.1f")% of page").monospacedDigit() }.font(.caption)
+                        ResettableSlider(value: spineBinding(\.width), range: 0.01...0.75, step: 0.001, label: "Spine width", resetValue: SpineSettings().width)
                             .frame(height: 20)
-                        HStack { Text("Strength"); Spacer(); Text("\(Int(library.edits.spineSettings.strength*100))%").monospacedDigit() }.font(.caption)
-                        ResettableSlider(value: spineBinding(\.strength), range: 0...1, step: 0.01, label: "Spine strength", resetValue: SpineSettings().strength)
+                        HStack { Text("Strength"); Spacer(); Text("\(library.edits.spineSettings.strength*100, specifier: "%.1f")%").monospacedDigit() }.font(.caption)
+                        ResettableSlider(value: spineBinding(\.strength), range: 0...1, step: 0.001, label: "Spine strength", resetValue: SpineSettings().strength)
                             .frame(height: 20)
                     }.disabled(!library.edits.spineSettings.enabled)
                     if library.edits.spine == nil && library.edits.shadow > 0 {
@@ -218,10 +285,9 @@ struct ContentView: View {
                     }
                     Text("Changes become the default for untouched pages. Adjusted pages keep their settings. Width is measured from the selected side of the full scan.").font(.caption).foregroundStyle(.secondary)
 
-                }
-                Divider()
+                }.settingsSection()
                 VStack(alignment: .leading, spacing: 9) {
-                    Text("Reuse settings").font(.headline)
+                    Label("Reuse settings", systemImage: "doc.on.clipboard").font(.headline)
                     HStack {
                         Button("Copy") { library.copied = library.edits }
                         Button("Paste") { if let copied = library.copied { library.edit(copied) } }.disabled(library.copied == nil)
@@ -231,10 +297,13 @@ struct ContentView: View {
                         Button("To all pages") { library.applyCopied(false) }
                     }.disabled(library.copied == nil)
                     Text("Odd/even follows the page list order. Batch changes clear done marks.").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("Double-click a slider to reset it.\n⌘Z undo • ⌘↵ done & next\n⌘← / ⌘→ previous / next").font(.caption).foregroundStyle(.secondary)
-            }.padding(18)
-        }.disabled(library.page == nil || library.busy || library.showOriginal)
+                }.settingsSection()
+                Text("Double-click a slider to reset it.\n⌘Z undo • ↵ done & next\n⌘← / ⌘→ previous / next").font(.caption).foregroundStyle(.secondary)
+            }.padding(14)
+        }
+        // Preserve the automatic toolbar safe-area inset for the first card.
+        .frame(maxHeight: .infinity, alignment: .top)
+        .scanGlassButtons().disabled(library.page == nil || library.busy || library.showOriginal)
     }
 }
 struct PageThumbnail: View {
@@ -255,6 +324,9 @@ struct PageThumbnail: View {
         .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary.opacity(0.25)))
         .accessibilityHidden(true)
         .task(id: edits) {
+            // Avoid decoding and rendering sidebar thumbnails on every drag event.
+            do { try await Task.sleep(nanoseconds: 250_000_000) }
+            catch { return }
             let result = await library.thumbnail(for: page, edits: edits)
             guard !Task.isCancelled else { return }
             thumbnail = result
@@ -263,19 +335,19 @@ struct PageThumbnail: View {
 }
 struct ScanCanvas: View {
     @EnvironmentObject var library: Library
+    let backdrop: ScanBackdropState
     @State private var drag: CGRect?
     @State private var cropDrag: CropDrag?
     @State private var zoom: CGFloat = 1
-    @State private var pinchStart: CGFloat?
     var body: some View {
       VStack(spacing: 0) {
         GeometryReader { geo in
             ZStack {
-                Color(nsColor: NSColor(calibratedWhite: 0.14, alpha: 1))
+                Color.clear
                 if let image = library.preview {
                     let factor = max(0.01, min((geo.size.width-48)/CGFloat(image.width), (geo.size.height-40)/CGFloat(image.height))) * zoom
                     let size = CGSize(width: CGFloat(image.width)*factor, height: CGFloat(image.height)*factor)
-                    ScrollView([.horizontal, .vertical]) {
+                    CursorZoomScrollView(zoom: $zoom, imageSize: size, backdrop: backdrop) {
                     ZStack {
                         Image(decorative: image, scale: 1).resizable().interpolation(.high).frame(width: size.width, height: size.height)
                         if !library.showOriginal && !library.croppedPreview && !library.drawingStraightenLine {
@@ -291,9 +363,10 @@ struct ScanCanvas: View {
                                     context.stroke(grid, with: .color(.cyan.opacity(0.4)), lineWidth: 0.6)
                                 }
                                 context.stroke(Path(r), with: .color(.cyan), lineWidth: 2)
-                                for p in [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)] { context.fill(Path(ellipseIn: CGRect(x: p.x-4, y: p.y-4, width: 8, height: 8)), with: .color(.white)) }
-                                for p in [CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)] {
-                                    context.fill(Path(roundedRect: CGRect(x: p.x-3, y: p.y-3, width: 6, height: 6), cornerRadius: 1), with: .color(.cyan))
+                                for p in [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)] {
+                                    // Keep the full handle visible when the crop reaches a page edge.
+                                    let center = CGPoint(x: min(max(p.x, 3), canvas.width - 3), y: min(max(p.y, 3), canvas.height - 3))
+                                    context.fill(Path(roundedRect: CGRect(x: center.x-3, y: center.y-3, width: 6, height: 6), cornerRadius: 1), with: .color(.cyan))
                                 }
                             }.frame(width: size.width, height: size.height)
                             .contentShape(Rectangle())
@@ -322,43 +395,43 @@ struct ScanCanvas: View {
                         if library.drawingStraightenLine && !library.showOriginal && !library.croppedPreview {
                             StraightenLineOverlay(size: size).frame(width: size.width, height: size.height)
                         }
-                    }.shadow(radius: 8)
+                    }.environmentObject(library).shadow(radius: 8)
                         .padding(.horizontal, 24).padding(.vertical, 20)
                         .frame(minWidth: geo.size.width, minHeight: geo.size.height)
                     }
-                    .defaultScrollAnchor(.center)
-                    .simultaneousGesture(MagnificationGesture().onChanged { value in
-                        if pinchStart == nil { pinchStart = zoom }
-                        zoom = min(6, max(1, (pinchStart ?? 1) * value))
-                    }.onEnded { _ in pinchStart = nil })
                 } else if library.page == nil {
                     VStack(spacing: 16) {
-                        Image(systemName: "doc.viewfinder").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(.cyan)
+                        Image(systemName: "doc.viewfinder").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(Color.accentColor)
                         Text("A clean page, every time.").font(.title2.bold())
                         Text("Import your scans, trim the edges, and straighten the text.\nPick up exactly where you left off.").multilineTextAlignment(.center).foregroundStyle(.secondary)
-                        Button("Import Scans…") { library.importScans() }.buttonStyle(.borderedProminent).controlSize(.large)
-                    }.foregroundStyle(.white)
-                } else { ProgressView().colorScheme(.dark) }
+                        Button("Import Scans…") { library.importScans() }.scanProminentButton().controlSize(.large)
+                    }
+                } else { ProgressView() }
             }
             .clipped()
         }
+        .overlay(alignment: .bottom) {
         HStack(spacing: 10) {
             Text("Zoom").font(.caption).foregroundStyle(.secondary)
             Button { zoom = max(1, zoom / 1.25) } label: { Image(systemName: "minus.magnifyingglass") }
-                .help("Zoom out").disabled(zoom <= 1)
+                .accessibilityLabel("Zoom out").help("Zoom out").disabled(zoom <= 1)
             Text(String(format: "%.0f%%", zoom * 100)).font(.caption.monospacedDigit()).frame(width: 44)
                 .help("Magnification relative to Fit")
             Button { zoom = min(6, zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
-                .help("Zoom in").disabled(zoom >= 6)
+                .accessibilityLabel("Zoom in").help("Zoom in").disabled(zoom >= 6)
             Button("Fit") { zoom = 1 }.help("Fit the whole page in the viewer")
-            Spacer()
-            Text("Pinch to zoom · Scroll to pan").font(.caption).foregroundStyle(.secondary)
+
         }
-        .buttonStyle(.borderless).padding(.horizontal, 14).padding(.vertical, 7)
+        .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 10)
+        .scanGlassSurface()
+        .help("Pinch to zoom · Scroll to pan")
         .disabled(library.preview == nil)
+        .padding(16)
+        }
+
       }
         .onChange(of: zoom) { _, _ in drag = nil; cropDrag = nil }
-        .onChange(of: library.state.selection) { _, _ in zoom = 1; pinchStart = nil }
+        .onChange(of: library.state.selection) { _, _ in zoom = 1 }
         .onChange(of: library.state.selection) { _, _ in drag = nil; cropDrag = nil }
         .onChange(of: library.showOriginal) { _, _ in drag = nil; cropDrag = nil }
         .onChange(of: library.croppedPreview) { _, _ in drag = nil; cropDrag = nil }

@@ -4,7 +4,11 @@ import UniformTypeIdentifiers
 
 @MainActor final class Library: ObservableObject {
     @Published var state = LibraryState()
+    @Published var showingPDFExport = false
+    var readyForPDF: Bool { !state.pages.isEmpty && state.pages.allSatisfy(\.reviewed) }
     @Published var preview: CGImage?
+    @Published private(set) var batchRunning = false
+    private var batchTask: Task<Void, Never>?
     @Published var busy = false
     @Published var status = "Import scans to begin"
     @Published var error: String?
@@ -15,7 +19,17 @@ import UniformTypeIdentifiers
     @Published var drawingStraightenLine = false
     private var previewSource: CGImage?
     private var renderTask: Task<Void, Never>?
-    private var undoEdits: [UUID: [PageEdits]] = [:]
+    private var previewRevision = 0
+    private var saveTask: Task<Void, Never>?
+    private enum UndoAction {
+        case page(UUID, PageEdits)
+        case batch([ScanPage])
+    }
+    private var undoActions: [UndoAction] = []
+    private func remember(_ action: UndoAction) {
+        undoActions.append(action)
+        if undoActions.count > 100 { undoActions.removeFirst() }
+    }
     private let thumbnails: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()
         cache.totalCostLimit = 24 * 1024 * 1024
@@ -55,7 +69,7 @@ import UniformTypeIdentifiers
         value.spineSettings = settings
         edit(value)
         state.spineDefaults = settings
-        save(); refresh()
+        scheduleSave()
     }
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Scan Tidy", isDirectory: true)
@@ -71,12 +85,23 @@ import UniformTypeIdentifiers
         } catch { self.error = "Could not open saved progress: \(error.localizedDescription)" }
     }
     func save() {
+        saveTask?.cancel()
+        saveTask = nil
         do { try JSONEncoder().encode(state).write(to: root.appendingPathComponent("library.json"), options: .atomic) }
         catch { self.error = "Could not save progress: \(error.localizedDescription)" }
+    }
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) }
+            catch { return }
+            self?.save()
+        }
     }
     func select(_ id: UUID?) {
         drawingStraightenLine = false
         renderTask?.cancel()
+        renderTask = nil
         state.selection = id; save()
         previewSource = nil; preview = nil
         guard let page else { return }
@@ -91,30 +116,51 @@ import UniformTypeIdentifiers
         }
     }
     func refresh() {
-        renderTask?.cancel()
-        guard let source = previewSource else { return }
-        let edits = showOriginal ? PageEdits() : self.edits
-        let crop = croppedPreview && !showOriginal
+        previewRevision += 1
+        guard previewSource != nil, renderTask == nil else { return }
         renderTask = Task {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            guard !Task.isCancelled else { return }
-            let result = await Task.detached(priority: .userInitiated) { Imaging.render(source, edits: edits, crop: crop) }.value
-            guard !Task.isCancelled else { return }
-            preview = result
+            // Keep one render in flight. New edits replace pending work instead of
+            // cancelling every frame and waiting for the user to stop dragging.
+            while !Task.isCancelled, let source = previewSource {
+                let revision = previewRevision
+                let edits = showOriginal ? PageEdits() : self.edits
+                let crop = croppedPreview && !showOriginal
+                let result = await Task.detached(priority: .userInitiated) {
+                    autoreleasepool { Imaging.render(source, edits: edits, crop: crop) }
+                }.value
+                guard !Task.isCancelled else { return }
+                preview = result
+                if revision == previewRevision { break }
+            }
+            renderTask = nil
         }
     }
     func edit(_ value: PageEdits) {
         drawingStraightenLine = false
         guard let i = index, value != edits else { return }
         let id = state.pages[i].id
-        undoEdits[id, default: []].append(edits)
-        if undoEdits[id, default: []].count > 100 { undoEdits[id]?.removeFirst() }
+        remember(.page(id, edits))
         state.pages[i].edits = value; state.pages[i].hasBeenEdited = true; state.pages[i].reviewed = false
-        save(); refresh()
+        scheduleSave(); refresh()
     }
     func undo() {
-        guard let i = index, let previous = undoEdits[state.pages[i].id]?.popLast() else { return }
-        state.pages[i].edits = previous; state.pages[i].reviewed = false; save(); refresh()
+        guard !busy, let action = undoActions.popLast() else { return }
+        switch action {
+        case .page(let id, let edits):
+            if let i = state.pages.firstIndex(where: { $0.id == id }) {
+                state.pages[i].edits = edits
+                state.pages[i].reviewed = false
+            }
+        case .batch(let snapshots):
+            for snapshot in snapshots {
+                guard let i = state.pages.firstIndex(where: { $0.id == snapshot.id }) else { continue }
+                state.pages[i].edits = snapshot.edits
+                state.pages[i].reviewed = snapshot.reviewed
+                state.pages[i].hasBeenEdited = snapshot.hasBeenEdited
+            }
+            status = "Undid straighten and crop for all affected pages"
+        }
+        save(); refresh()
     }
     func next(_ offset: Int) {
         guard let i = index else { return }
@@ -131,15 +177,26 @@ import UniformTypeIdentifiers
     func deletePage() {
         guard !busy, let i = index else { return }
         let removed = state.pages.remove(at: i)
-        undoEdits.removeValue(forKey: removed.id)
+        undoActions.removeAll { action in
+            if case .page(let id, _) = action { return id == removed.id }
+            return false
+        }
         let nextID = state.pages.isEmpty ? nil : state.pages[min(i, state.pages.count - 1)].id
         select(nextID)
         status = "Deleted \(removed.name) from the library"
     }
     func markNext() {
-        guard let i = index else { return }
+        guard !busy, let i = index else { return }
         state.pages[i].edits = edits; state.pages[i].hasBeenEdited = true
-        state.pages[i].reviewed = true; save(); next(1)
+        state.pages[i].reviewed = true
+        save()
+        if i + 1 < state.pages.count {
+            select(state.pages[i + 1].id)
+            status = "Page \(i + 1) marked done · now on page \(i + 2)"
+        } else {
+            drawingStraightenLine = false
+            status = "Page \(i + 1) marked done · last page reached"
+        }
     }
     func importScans() {
         let panel = NSOpenPanel()
@@ -173,27 +230,18 @@ import UniformTypeIdentifiers
             if !failures.isEmpty { error = "Could not import:\n" + failures.joined(separator: "\n") }
         }
     }
-    func autoAdjust() {
-        guard let source = previewSource, let id = page?.id else { return }
-        busy = true; status = "Finding page edges…"
-        let edits = self.edits
-        Task {
-            let result = await Task.detached(priority: .userInitiated) { Imaging.autoAdjust(source, edits: edits) }.value
-            if state.selection == id { edit(result.edits) }
-            busy = false
-            status = result.found ? "Suggested crop and angle · check the edges before marking done" : "Text straightened · adjust the blue crop edges for pale page boundaries"
-        }
-    }
     func resetCrop() {
         guard !busy else { return }
         var value = edits
         value.left = 0; value.right = 0; value.top = 0; value.bottom = 0
         edit(value)
+        save()
     }
     func resetPage() {
         guard !busy, page != nil else { return }
         drawingStraightenLine = false
         edit(PageEdits())
+        save()
     }
     func beginStraightenLine() {
         guard !busy, page != nil, preview != nil else { return }
@@ -226,6 +274,7 @@ import UniformTypeIdentifiers
         var value = edits
         value.angle = 0; value.quarterTurns = 0
         edit(value)
+        save()
     }
     func autoCrop() {
         guard !busy, let source = previewSource, let id = page?.id else { return }
@@ -238,37 +287,100 @@ import UniformTypeIdentifiers
             status = result.found ? "Page edges detected · review the crop before export" : "No clear page edges found · adjust the blue crop lines or edge sliders"
         }
     }
-    func straightenAll() {
+    func straightenPage() {
+        guard !busy, let page else { return }
+        drawingStraightenLine = false
+        let current = edits
+        let url = root.appendingPathComponent("Originals").appendingPathComponent(page.storedFile)
+        busy = true; status = "Straightening this page…"
+        Task {
+            let adjusted = await Task.detached(priority: .userInitiated) { () -> PageEdits? in
+                autoreleasepool {
+                    guard let source = Imaging.load(url, maxSize: 1400) else { return nil }
+                    var base = current; base.angle = 0
+                    guard let rotated = Imaging.render(source, edits: base, crop: false) else { return nil }
+                    base.angle = Imaging.textAngle(rotated)
+                    return Imaging.cropRotationBorders(source, edits: base)
+                }
+            }.value
+            if let adjusted {
+                if state.selection == page.id {
+                    edit(adjusted)
+                    save()
+                    status = "Page straightened · review the angle before marking done"
+                }
+            } else {
+                error = "Could not read \(page.name) for straightening."
+                status = "Could not straighten this page"
+            }
+            busy = false
+        }
+    }
+    func stopStraightenAndCrop() {
+        guard batchRunning else { return }
+        batchTask?.cancel()
+        status = "Stopping straighten and crop…"
+    }
+    func cancelCurrentOperation() {
+        if batchRunning { stopStraightenAndCrop() }
+        else { cancelStraightenLine() }
+    }
+    func straightenAndCropAll() {
+        guard !busy, !state.pages.isEmpty else { return }
+        drawingStraightenLine = false
         busy = true
-        let pages = state.pages.map { page -> ScanPage in
+        let snapshots = state.pages.filter { !$0.reviewed }
+        guard !snapshots.isEmpty else {
+            busy = false
+            status = "All pages are already marked done"
+            return
+        }
+        let pages = snapshots.map { page -> ScanPage in
             var snapshot = page; snapshot.edits = resolvedEdits(for: page); return snapshot
         }
-        Task {
+        batchRunning = true
+        batchTask = Task {
+            var affected: [ScanPage] = []
+            var failures: [String] = []
+            var missingEdges = 0
             for (n, page) in pages.enumerated() {
-                status = "Straightening \(n+1) of \(pages.count)…"
+                if Task.isCancelled { break }
+                status = "Straightening and cropping \(n+1) of \(pages.count)…"
                 let url = root.appendingPathComponent("Originals").appendingPathComponent(page.storedFile)
-                let angle = await Task.detached(priority: .utility) { () -> Double? in
+                let result = await Task.detached(priority: .utility) { () -> AutoResult? in
                     autoreleasepool {
-                        guard let source = Imaging.load(url, maxSize: 1400) else { return nil }
-                        var e = page.edits; e.angle = 0
-                        guard let rotated = Imaging.render(source, edits: e, crop: false) else { return nil }
-                        return Imaging.textAngle(rotated)
+                        guard let source = Imaging.load(url, maxSize: 1800) else { return nil }
+                        var edits = page.edits; edits.angle = 0
+                        guard let rotated = Imaging.render(source, edits: edits, crop: false) else { return nil }
+                        edits.angle = Imaging.textAngle(rotated)
+                        return Imaging.autoCrop(source, edits: edits)
                     }
                 }.value
-                if let angle, let i = state.pages.firstIndex(where: { $0.id == page.id }) {
-                    undoEdits[page.id, default: []].append(page.edits)
-                    state.pages[i].edits = page.edits; state.pages[i].hasBeenEdited = true
-                    state.pages[i].edits.angle = angle; state.pages[i].reviewed = false
-                    save()
-                }
+                if Task.isCancelled { break }
+                guard let result else { failures.append(page.name); continue }
+                if !result.found { missingEdges += 1 }
+                guard let i = state.pages.firstIndex(where: { $0.id == page.id }) else { continue }
+                affected.append(snapshots[n])
+                state.pages[i].edits = result.edits
+                state.pages[i].hasBeenEdited = true
+                state.pages[i].reviewed = false
             }
-            busy = false; refresh(); status = "Straightening finished · review each page before export"
+            if !affected.isEmpty { remember(.batch(affected)) }
+            save(); refresh()
+            batchRunning = false
+            batchTask = nil
+            busy = false
+            status = Task.isCancelled
+                ? "Stopped · straightened and cropped \(affected.count) pages · Undo restores these pages"
+                : "Straightened and cropped \(affected.count) pages · review before marking done"
+            if missingEdges > 0 { status += " · \(missingEdges) need a manual crop check" }
+            if !failures.isEmpty { error = "Could not process:\n" + failures.joined(separator: "\n") }
         }
     }
     func applyCopied(_ parity: Bool) {
         guard let copied, let i = index else { return }
         for n in state.pages.indices where n != i && (!parity || n % 2 == i % 2) {
-            undoEdits[state.pages[n].id, default: []].append(resolvedEdits(for: state.pages[n]))
+            remember(.page(state.pages[n].id, resolvedEdits(for: state.pages[n])))
             state.pages[n].hasBeenEdited = true; state.pages[n].edits = copied; state.pages[n].reviewed = false
         }
         save(); refresh(); status = parity ? "Settings applied to matching odd/even pages" : "Settings applied to all pages"

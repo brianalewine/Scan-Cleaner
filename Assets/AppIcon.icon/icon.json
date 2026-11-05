@@ -1,0 +1,42 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.04,0.32,0.46,1.0"
+  },
+  "groups": [
+    {
+      "name": "Page",
+      "lighting": "individual",
+      "specular": true,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "layers": [
+        {
+          "image-name": "Page.svg",
+          "name": "Page"
+        }
+      ]
+    },
+    {
+      "name": "Scan",
+      "lighting": "individual",
+      "specular": true,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "layers": [
+        {
+          "image-name": "Scan.svg",
+          "name": "Scan"
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

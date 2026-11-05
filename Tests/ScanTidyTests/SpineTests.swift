@@ -51,6 +51,7 @@ final class SpineTests: XCTestCase {
             }
             let imported = ScanPage(name: "new.png", storedFile: "new.png")
             XCTAssertFalse(library.resolvedEdits(for: imported).spineSettings.enabled)
+            library.save()
             let reopened = Library(root: root)
             XCTAssertTrue(reopened.resolvedEdits(for: reopened.state.pages[1]).spineSettings.enabled)
             XCTAssertFalse(reopened.resolvedEdits(for: reopened.state.pages[2]).spineSettings.enabled)
