@@ -1,6 +1,6 @@
 import XCTest
 import CoreImage
-@testable import ScanTidy
+@testable import ScanCleaner
 
 final class StraightenLineTests: XCTestCase {
     func testCorrectionUsesDisplayCoordinatesAndIsDirectionIndependent() throws {

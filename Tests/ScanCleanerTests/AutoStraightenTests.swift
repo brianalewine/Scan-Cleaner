@@ -1,5 +1,5 @@
 import XCTest
-@testable import ScanTidy
+@testable import ScanCleaner
 
 final class AutoStraightenTests: XCTestCase {
     func testRotationCropCornersStayInsideSourceOnEverySide() throws {

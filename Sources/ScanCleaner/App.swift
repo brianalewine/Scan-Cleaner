@@ -1,19 +1,25 @@
 import SwiftUI
 import AppKit
 
-@main struct ScanTidyApp: App {
-    @StateObject private var library = Library()
+@main struct ScanCleanerApp: App {
+    @StateObject private var projects = Projects()
+    private var library: Library { projects.active }
     var body: some Scene {
         Window("Scan Cleaner", id: "main") {
-            ContentView().environmentObject(library).frame(minWidth: 1000, minHeight: 680)
+            ProjectWorkspace().environmentObject(projects).frame(minWidth: 1000, minHeight: 680)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    library.save()
+                    _ = projects.save()
                 }
+                .alert("Scan Projects", isPresented: Binding(get: { projects.error != nil }, set: { if !$0 { projects.error = nil } })) {
+                    Button("OK") { projects.error = nil }
+                } message: { Text(projects.error ?? "") }
         }
         .defaultSize(width: 1320, height: 900)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) { Button("Import Scans…") { library.importScans() }.keyboardShortcut("o").disabled(library.busy || library.showingPDFExport) }
+            CommandGroup(replacing: .newItem) {
+                ProjectControls().environmentObject(projects)
+                Button("Import Scans…") { projects.importScans() }.keyboardShortcut("o").disabled(library.busy || library.showingPDFExport) }
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo Edit") { library.undo() }.keyboardShortcut("z").disabled(library.busy || library.showingPDFExport)
                 Button("Undo Edit (Control-Z)") { library.undo() }.keyboardShortcut("z", modifiers: .control).disabled(library.busy || library.showingPDFExport)
@@ -26,37 +32,47 @@ import AppKit
                     .keyboardShortcut(.escape, modifiers: [])
                     .disabled(!library.batchRunning && !library.drawingStraightenLine)
             }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Progress") { _ = projects.save() }.keyboardShortcut("s")
+            }
             CommandGroup(after: .saveItem) { Button("Export Cleaned Images…") { library.export() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(library.busy || library.state.pages.isEmpty || library.showingPDFExport) }
         }
+
     }
 }
 struct ContentView: View {
     @EnvironmentObject var library: Library
+    @EnvironmentObject var projects: Projects
     @State private var showingDeleteConfirmation = false
-    @State private var showingInspector = true
-    @State private var showingSidebar = true
+    @AppStorage("showingInspector") private var showingInspector = true
+    @AppStorage("showingSidebar") private var showingSidebar = true
     @StateObject private var backdrop = ScanBackdropState()
     var body: some View {
-        Group {
-            if library.showingPDFExport {
-                PDFExportView()
-            } else {
+        ZStack {
             GeometryReader { contentArea in
             HSplitView {
                 if showingSidebar {
                     sidebar.frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
                 }
                 VStack(spacing: 0) {
-                    ScanCanvas(backdrop: backdrop).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ScanCanvas(backdrop: backdrop).disabled(library.hasMultipleSelection).frame(maxWidth: .infinity, maxHeight: .infinity)
                     HStack {
                         Button { library.next(-1) } label: { Label("Previous", systemImage: "chevron.left") }.keyboardShortcut(.leftArrow, modifiers: [.command])
                             .disabled(library.index == nil || library.index == 0)
                         Spacer()
                         if let i = library.index { Text("\(i+1) / \(library.state.pages.count)").monospacedDigit().foregroundStyle(.secondary) }
                         Spacer()
-                        Button("Mark Done & Next", systemImage: "checkmark.circle") { library.markNext() }
-                            .help("Mark this page as done, save it, and select the next page (Return)")
+                        Button(library.readyForPDF ? "Prepare for PDF Export" : "Mark Done & Next", systemImage: library.readyForPDF ? "doc.richtext" : "checkmark.circle") {
+                            if library.readyForPDF {
+                                library.cancelStraightenLine()
+                                library.showingPDFExport = true
+                            } else {
+                                library.markNext()
+                            }
+                        }
+                            .help(library.readyForPDF ? "Prepare all reviewed pages for PDF export (Return)" : "Mark this page as done, save it, and select the next page (Return)")
                             .keyboardShortcut(.return, modifiers: []).scanProminentButton()
+                            .tint(library.readyForPDF ? Color.green : Color.accentColor)
                         Button { library.next(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next page").help("Next page (⌘→)").keyboardShortcut(.rightArrow, modifiers: [.command]).disabled(library.index == nil || library.index == library.state.pages.count-1)
                     }.scanGlassButtons().padding(14).disabled(library.page == nil || library.busy)
                 }
@@ -72,7 +88,14 @@ struct ContentView: View {
             .frame(width: contentArea.size.width, height: contentArea.size.height)
             .clipped()
             }
-            .navigationTitle(library.page?.name ?? "Scan Cleaner")
+            .navigationTitle(projects.activeName)
+            // Keep the native list, thumbnails, and canvas state alive during export.
+            .opacity(library.showingPDFExport ? 0 : 1)
+            .disabled(library.showingPDFExport)
+            .allowsHitTesting(!library.showingPDFExport)
+            .accessibilityHidden(library.showingPDFExport)
+            if library.showingPDFExport {
+                PDFExportView()
             }
         }
         // Keep scrolling controls inside the content area below the titlebar.
@@ -85,30 +108,33 @@ struct ContentView: View {
         }
         .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
+            ToolbarItem(placement: .navigation) { ProjectControls() }
             ToolbarItem(placement: .navigation) {
                 Button("Pages", systemImage: "sidebar.left") { showingSidebar.toggle() }
                     .help("Show or hide pages").disabled(library.showingPDFExport)
             }
-            ToolbarItem(placement: .principal) {
-                // Center progress on the window, independently of the action group.
-                // Keep its width stable when progress appears or disappears.
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                        .opacity(library.busy ? 1 : 0)
-                    Text(library.busy || library.drawingStraightenLine ? library.status : "")
-                        .font(.caption).monospacedDigit().lineLimit(1)
-                    Button { library.stopStraightenAndCrop() } label: {
-                        Image(systemName: "xmark.circle")
+            if !library.showingPDFExport {
+                ToolbarItem(placement: .principal) {
+                    // Center progress on the window, independently of the action group.
+                    // Keep its width stable when progress appears or disappears.
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                            .opacity(library.busy ? 1 : 0)
+                        Text(library.busy || library.drawingStraightenLine ? library.status : "")
+                            .font(.caption).monospacedDigit().lineLimit(1)
+                        Button { library.stopStraightenAndCrop() } label: {
+                            Image(systemName: "xmark.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Stop straightening and cropping (Esc)")
+                        .accessibilityLabel("Stop straightening and cropping")
+                        .disabled(!library.batchRunning)
+                        .opacity(library.batchRunning ? 1 : 0)
                     }
-                    .buttonStyle(.plain)
-                    .help("Stop straightening and cropping (Esc)")
-                    .accessibilityLabel("Stop straightening and cropping")
-                    .disabled(!library.batchRunning)
-                    .opacity(library.batchRunning ? 1 : 0)
+                    .frame(width: 280)
+                    .opacity(library.busy || library.drawingStraightenLine ? 1 : 0)
+                    .help(library.status)
                 }
-                .frame(width: 280)
-                .opacity(library.busy || library.drawingStraightenLine ? 1 : 0)
-                .help(library.status)
             }
             if #available(macOS 26.0, *) {
                 // A real NSToolbar flexible space keeps the actions at the trailing edge.
@@ -133,48 +159,53 @@ struct ContentView: View {
                     .help("Show or hide adjustments")
                     .disabled(library.showingPDFExport)
             }
-            ToolbarItem(placement: .primaryAction) { Button("Import Scans", systemImage: "plus") { library.importScans() }.disabled(library.busy || library.showingPDFExport) }
             ToolbarItem(placement: .primaryAction) { Button("Export Images", systemImage: "square.and.arrow.up") { library.export() }.disabled(library.busy || library.state.pages.isEmpty || library.showingPDFExport) }
-            ToolbarItem(placement: .primaryAction) { Button("PDF Export…", systemImage: "doc.richtext") { library.cancelStraightenLine(); library.showingPDFExport = true }.disabled(library.busy || !library.readyForPDF || library.showingPDFExport).help("Mark every page done to prepare a PDF") }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    library.cancelStraightenLine()
+                    library.showingPDFExport = true
+                } label: {
+                    Label {
+                        Text("PDF Export…")
+                    } icon: {
+                        Image(systemName: "doc.richtext")
+                            .foregroundStyle(library.readyForPDF ? Color.green : Color.primary)
+                    }
+                }
+                .disabled(library.busy || !library.readyForPDF || library.showingPDFExport)
+                .help(library.readyForPDF ? "All pages are done — prepare a PDF" : "Mark every page done to prepare a PDF")
+            }
         }
         .alert("Scan Cleaner", isPresented: Binding(get: { library.error != nil }, set: { if !$0 { library.error = nil } })) { Button("OK") { library.error = nil } } message: { Text(library.error ?? "") }
     }
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Label("Pages", systemImage: "doc.on.doc").font(.headline); Spacer(); Text("\(library.state.pages.filter(\.reviewed).count) done").font(.caption).foregroundStyle(.secondary) }.padding(.horizontal, 15).padding(.top, 16)
-            ScrollViewReader { proxy in
-              List(selection: Binding(get: { library.state.selection }, set: { library.select($0) })) {
-                ForEach(Array(library.state.pages.enumerated()), id: \.element.id) { i, page in
-                    HStack(spacing: 9) {
-                        PageThumbnail(page: page)
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 4) {
-                                Text("Page \(i+1)").fontWeight(.medium)
-                                if page.reviewed { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Done") }
-                            }
-                            Text(page.name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        }
-                    }.padding(.vertical, 5).tag(page.id).id(page.id)
+            HStack {
+                Label("Pages", systemImage: "doc.on.doc").font(.headline)
+                Spacer()
+                Text("\(library.state.pages.filter(\.reviewed).count) done").font(.caption).foregroundStyle(.secondary)
+                Button { projects.importScans() } label: { Image(systemName: "doc.badge.plus") }
+                    .buttonStyle(.borderless).help("Import pages into this project")
+                    .accessibilityLabel("Import pages").disabled(library.busy || library.showingPDFExport)
+            }.padding(.horizontal, 15).padding(.top, 16)
+            Button {
+                if let page = library.state.pages.first(where: { !$0.reviewed }) {
+                    library.select(page.id)
                 }
-                .onMove { offsets, destination in
-                    library.movePages(from: offsets, to: destination)
-                }
-              }.listStyle(.sidebar).scrollContentBackground(.hidden).disabled(library.busy)
-              .task {
-                  // Wait for the native list to finish its initial layout.
-                  await Task.yield()
-                  if let selection = library.state.selection { proxy.scrollTo(selection, anchor: .center) }
-              }
-              .onChange(of: library.state.selection) { _, selection in
-                  // Without an anchor, scrollTo only moves enough to reveal an
-                  // offscreen row. A visible selection keeps the scroll position.
-                  if let selection { proxy.scrollTo(selection) }
-              }
+            } label: {
+                Label("Jump to unmarked", systemImage: "arrow.down.to.line")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .help("Select the first page that has not been marked done")
+            .disabled(library.busy || !library.state.pages.contains(where: { !$0.reviewed }))
+            .padding(.horizontal, 15)
+            PageList().environmentObject(library).disabled(library.busy)
             Button("Delete Page…", systemImage: "trash", role: .destructive) {
                 showingDeleteConfirmation = true
             }
-            .disabled(library.page == nil || library.busy)
+            .disabled(library.page == nil || library.hasMultipleSelection || library.busy)
             .padding(.horizontal, 15)
             .alert("Delete this page?", isPresented: $showingDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
@@ -182,7 +213,7 @@ struct ContentView: View {
             } message: {
                 Text("Remove \(library.page?.name ?? "this page") from the library? Your original file stays untouched. You can import it again later.")
             }
-            Text("Drag pages to rearrange them. Scans are copied into your library. Original files stay untouched.").font(.caption).foregroundStyle(.secondary).padding(15)
+            Text("Shift-click for a range; Control-click or ⌘-click for individual pages. Drag selected pages to rearrange them.").font(.caption).foregroundStyle(.secondary).padding(15)
         }
         .scanGlassButtons()
     }
@@ -260,7 +291,7 @@ struct ContentView: View {
                     }
                     Button("Auto Detect Page Edges", systemImage: "viewfinder") { library.autoCrop() }
                     Text("Auto crop keeps the current rotation and looks for the page edge inside any visible stack of sheets.").font(.caption).foregroundStyle(.secondary)
-                    Text("Drag a blue edge or corner to resize the crop. Use these sliders to fine-tune.").font(.caption).foregroundStyle(.secondary)
+                    Text("Drag an edge or corner to resize the crop. Use these sliders to fine-tune.").font(.caption).foregroundStyle(.secondary)
                     cropSlider("Left", \.left, opposite: library.edits.right)
                     cropSlider("Right", \.right, opposite: library.edits.left)
                     cropSlider("Top", \.top, opposite: library.edits.bottom)
@@ -303,7 +334,7 @@ struct ContentView: View {
         }
         // Preserve the automatic toolbar safe-area inset for the first card.
         .frame(maxHeight: .infinity, alignment: .top)
-        .scanGlassButtons().disabled(library.page == nil || library.busy || library.showOriginal)
+        .scanGlassButtons().disabled(library.page == nil || library.hasMultipleSelection || library.busy || library.showOriginal)
     }
 }
 struct PageThumbnail: View {
@@ -334,6 +365,8 @@ struct PageThumbnail: View {
     }
 }
 struct ScanCanvas: View {
+    @Environment(\.displayScale) private var displayScale
+    @EnvironmentObject var projects: Projects
     @EnvironmentObject var library: Library
     let backdrop: ScanBackdropState
     @State private var drag: CGRect?
@@ -352,21 +385,27 @@ struct ScanCanvas: View {
                         Image(decorative: image, scale: 1).resizable().interpolation(.high).frame(width: size.width, height: size.height)
                         if !library.showOriginal && !library.croppedPreview && !library.drawingStraightenLine {
                             Canvas { context, canvas in
+                                // Difference blending must share a drawing surface with the scan.
+                                // Separate SwiftUI layers can blend against transparency instead.
+                                context.draw(Image(decorative: image, scale: 1), in: CGRect(origin: .zero, size: canvas))
                                 let e = library.edits
                                 let r = drag ?? CGRect(x: e.left*canvas.width, y: e.top*canvas.height, width: (1-e.left-e.right)*canvas.width, height: (1-e.top-e.bottom)*canvas.height)
                                 var mask = Path(CGRect(origin: .zero, size: canvas)); mask.addRect(r)
                                 context.fill(mask, with: .color(.black.opacity(0.55)), style: FillStyle(eoFill: true))
+                                context.blendMode = .difference
+                                let hairline = 1 / max(displayScale, 1)
                                 if library.grid {
                                     var grid = Path()
                                     for i in 1..<16 { let y = r.minY + r.height*Double(i)/16; grid.move(to: CGPoint(x: r.minX, y: y)); grid.addLine(to: CGPoint(x: r.maxX, y: y)) }
                                     for i in 1..<4 { let x = r.minX+r.width*Double(i)/4; grid.move(to: CGPoint(x: x, y: r.minY)); grid.addLine(to: CGPoint(x: x, y: r.maxY)) }
-                                    context.stroke(grid, with: .color(.cyan.opacity(0.4)), lineWidth: 0.6)
+                                    context.stroke(grid, with: .color(.white), lineWidth: hairline)
                                 }
-                                context.stroke(Path(r), with: .color(.cyan), lineWidth: 2)
+                                context.stroke(Path(r), with: .color(.white), lineWidth: hairline)
                                 for p in [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)] {
                                     // Keep the full handle visible when the crop reaches a page edge.
                                     let center = CGPoint(x: min(max(p.x, 3), canvas.width - 3), y: min(max(p.y, 3), canvas.height - 3))
-                                    context.fill(Path(roundedRect: CGRect(x: center.x-3, y: center.y-3, width: 6, height: 6), cornerRadius: 1), with: .color(.cyan))
+                                    let handle = Path(roundedRect: CGRect(x: center.x-3, y: center.y-3, width: 6, height: 6), cornerRadius: 1)
+                                    context.stroke(handle, with: .color(.white), lineWidth: hairline)
                                 }
                             }.frame(width: size.width, height: size.height)
                             .contentShape(Rectangle())
@@ -404,7 +443,7 @@ struct ScanCanvas: View {
                         Image(systemName: "doc.viewfinder").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(Color.accentColor)
                         Text("A clean page, every time.").font(.title2.bold())
                         Text("Import your scans, trim the edges, and straighten the text.\nPick up exactly where you left off.").multilineTextAlignment(.center).foregroundStyle(.secondary)
-                        Button("Import Scans…") { library.importScans() }.scanProminentButton().controlSize(.large)
+                        Button("Import Scans…") { projects.importScans() }.scanProminentButton().controlSize(.large)
                     }
                 } else { ProgressView() }
             }
@@ -430,7 +469,12 @@ struct ScanCanvas: View {
         }
 
       }
-        .onChange(of: zoom) { _, _ in drag = nil; cropDrag = nil }
+        .onAppear { zoom = library.state.zoom ?? 1 }
+        .onChange(of: zoom) { _, value in
+            drag = nil; cropDrag = nil
+            library.state.zoom = value
+            library.save()
+        }
         .onChange(of: library.state.selection) { _, _ in zoom = 1 }
         .onChange(of: library.state.selection) { _, _ in drag = nil; cropDrag = nil }
         .onChange(of: library.showOriginal) { _, _ in drag = nil; cropDrag = nil }

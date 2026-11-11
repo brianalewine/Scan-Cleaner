@@ -26,9 +26,9 @@ In **Straighten**, click **Draw Line to Straighten**, then click once at each en
 
 To remove a page, select it in the sidebar, click **Delete Page…**, and confirm. The next page is selected, or the previous page if you deleted the last one. Your original source file stays untouched, and you can import it again later.
 
-Every edit, page selection, review mark and view toggle is saved automatically. Close or quit and reopen to resume. Imported originals are copied into `~/Library/Application Support/Scan Tidy/Originals`; progress is in `library.json` beside it. Back up the whole Scan Tidy folder to preserve your library. The original files you selected are never modified. Undo history is session-only.
+Every edit, page selection, review mark and view toggle is saved automatically. Close or quit and reopen to resume. Imported originals are copied into `~/Library/Application Support/Scan Cleaner/Originals`; progress is in `library.json` beside it. Back up the whole Scan Cleaner folder to preserve your library. The original files you selected are never modified. Undo history is session-only.
 
-Shadow reduction lightens illumination near the selected side edge; it does not reconstruct missing text or flatten curved text near the spine. Very faint page boundaries still need a manual crop. Automatic text straightening searches roughly ±6 degrees, with manual fine rotation available up to ±12 degrees plus 90-degree turns. This version exports images, not PDFs, and keeps one continuing library.
+Shadow reduction lightens illumination near the selected side edge. Very faint page boundaries still need a manual crop. Automatic text straightening searches roughly ±6 degrees, with manual fine rotation available up to ±12 degrees plus 90-degree turns.
 
 ## Included samples
 
@@ -49,7 +49,15 @@ Existing libraries remain compatible. Previously adjusted pages keep their origi
 
 ## PDF export
 
-After marking every page done, choose **PDF Export…**. The export screen offers color/grayscale, scan and output resolution, JPEG quality, local searchable-text OCR, ISBN lookup, manual book details, and a sampled file-size estimate. **Back to Editing** preserves progress and settings. Source metadata is discarded and only supplied book information is added. **Save PDF…** creates a fresh PDF in page-list order; the final size appears after saving. See [PDF export research and limitations](EXPORT-NOTES.md) for upload-limit confidence, compression choices, and OCR behavior.
+After marking every page done, choose **PDF Export…**. For an illustrated book, start with **Illustrated**. Adaptive compression stores smooth letter edges in a full-page, 16-shade layer over the scanned colors and illustrations. It uses a whole-page JPEG when separation is unsuitable or would increase the file size. Use **Whole-page JPEG** or **Whole-page JPEG 2000** to preserve subtle shading throughout a page.
+
+In Adaptive mode, **Simplification** levels 1–5 keep lettering over a photographic background. **Picture resolution** can go down to 10% and **Picture quality** to 5%. For smaller files, try levels 6–10. These reduce the foreground palette to 16, 8, 4, 2, or 1 ink color respectively. Level 10 also retains bright lettering over dark photographs and detects a palette of measured source ink colors for headings and flat graphics. For further control, turn on **Apply palette to pictures too** to use up to 32, 16, 8, 4, or 2 colors across the whole page. Both options keep the selected export resolution. Picture sliders apply only when the page has a photographic layer. Leave **Keep saved PDF within size target** off to export exactly the settings you preview. Zoom in on small captions, colored lettering, and shaded pictures as you adjust the slider.
+
+**Smaller file** keeps a 300 dpi export setting for text and reduces the resolution and quality of pictures. Adaptive compression keeps grayscale source files in grayscale alongside color pages. **Read resolution from each scan** uses embedded scan resolution, with a manual fallback for untagged images. Existing saved PDF settings keep their original JPEG and manual-resolution behavior until you change them.
+
+Use the page preview to check small print, faint marks, and illustrations, and compare image sizes across several pages. The size estimate samples up to five pages. If it exceeds your target, **Tune pictures for this target** tries several picture settings while keeping the selected text resolution. A 100 MB target for 300 pages allows about 333 KB per page on average. Enable **Keep saved PDF within size target** for a byte-limited export. The exporter measures the remaining space after every page and fits oversized pages using palette compression when Simplification is enabled. It first reduces photographic detail, then tries whole-page palettes with 32 and 16 colors, then reduces pixels if necessary. Other modes fit oversized pages using JPEG. It recognizes text before fitting the visible image. The final size appears after saving.
+
+Local searchable-text OCR, ISBN lookup, and manual book details are available for every compression mode. **Back to Editing** preserves progress and settings. Source metadata is discarded and only supplied book information is added. **Save PDF…** creates a fresh PDF in page-list order.
 
 ### Native macOS appearance
 
@@ -57,4 +65,4 @@ The workspace uses a resizable navigation sidebar and a collapsible Adjustments 
 
 The toolbar, sidebars, and bottom controls share one continuous AppKit sidebar-material backdrop with within-window blending. Its scan image follows the viewer’s zoom and pan in window coordinates, so panels never independently fit or crop their blur source. Reduce Transparency replaces it with the semantic window background. Colors follow the system appearance, including Dark Mode. There is no persistent bottom status bar; active processing and line-straightening instructions appear in the toolbar.
 
-The app icon is authored in `Assets/AppIcon.icon` and compiled with Xcode’s asset compiler for native Liquid Glass rendering, with an ICNS fallback for older macOS versions. The build requires Xcode 26 or later. The existing `Scan Tidy` library folder is retained across the rename.
+The app icon is authored in `Assets/AppIcon.icon` and compiled with Xcode’s asset compiler for native Liquid Glass rendering, with an ICNS fallback for older macOS versions. The build requires Xcode 26 or later. Existing libraries are automatically moved to the `Scan Cleaner` support folder on first launch.

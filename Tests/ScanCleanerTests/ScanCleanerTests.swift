@@ -1,9 +1,9 @@
 import XCTest
-@testable import ScanTidy
+@testable import ScanCleaner
 import AppKit
 import SwiftUI
 
-final class ScanTidyTests: XCTestCase {
+final class ScanCleanerTests: XCTestCase {
     @MainActor func testMarkDoneAdvancesAndPersists() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let library = Library(root: root)
@@ -179,7 +179,7 @@ final class ScanTidyTests: XCTestCase {
         library.state = LibraryState(pages: [page], selection: page.id)
         library.preview = try XCTUnwrap(Imaging.load(workspace.appendingPathComponent("TestScans/01-narratives.png"), maxSize: 1600))
         library.status = "Ready · draw a crop or suggest an angle"
-        let hosting = NSHostingView(rootView: ContentView().environmentObject(library))
+        let hosting = NSHostingView(rootView: ContentView().environmentObject(library).environmentObject(Projects(root: library.root.appendingPathComponent("ProjectLibrary"))))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 900), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .aqua)
         hosting.appearance = NSAppearance(named: .aqua)

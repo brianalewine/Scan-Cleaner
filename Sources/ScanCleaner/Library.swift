@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 @MainActor final class Library: ObservableObject {
     @Published var state = LibraryState()
+    @Published private(set) var selectedPageIDs: Set<UUID> = []
+    var hasMultipleSelection: Bool { selectedPageIDs.count > 1 }
     @Published var showingPDFExport = false
     var readyForPDF: Bool { !state.pages.isEmpty && state.pages.allSatisfy(\.reviewed) }
     @Published var preview: CGImage?
@@ -72,8 +74,11 @@ import UniformTypeIdentifiers
         scheduleSave()
     }
     init(root: URL? = nil) {
-        self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Scan Tidy", isDirectory: true)
+        self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Scan Cleaner", isDirectory: true)
         do {
+            if root == nil {
+                try Self.migrateLibrary(in: self.root.deletingLastPathComponent())
+            }
             try FileManager.default.createDirectory(at: self.root.appendingPathComponent("Originals"), withIntermediateDirectories: true)
             let file = self.root.appendingPathComponent("library.json")
             if FileManager.default.fileExists(atPath: file.path) { state = try JSONDecoder().decode(LibraryState.self, from: Data(contentsOf: file)) }
@@ -83,6 +88,20 @@ import UniformTypeIdentifiers
             if index == nil { state.selection = state.pages.first?.id }
             select(state.selection)
         } catch { self.error = "Could not open saved progress: \(error.localizedDescription)" }
+    }
+    /// The former folder name is retained only to locate existing user data.
+    static func migrateLibrary(in support: URL) throws {
+        let legacy = support.appendingPathComponent("Scan Tidy", isDirectory: true)
+        let destination = support.appendingPathComponent("Scan Cleaner", isDirectory: true)
+        let manager = FileManager.default
+        if manager.fileExists(atPath: legacy.path) && !manager.fileExists(atPath: destination.path) {
+            try manager.moveItem(at: legacy, to: destination)
+        }
+    }
+
+    func cancelPendingSave() {
+        saveTask?.cancel()
+        saveTask = nil
     }
     func save() {
         saveTask?.cancel()
@@ -98,7 +117,16 @@ import UniformTypeIdentifiers
             self?.save()
         }
     }
+    func selectPages(_ ids: Set<UUID>) {
+        let valid = ids.intersection(state.pages.map(\.id))
+        let primary = state.selection.flatMap { valid.contains($0) ? $0 : nil }
+            ?? state.pages.first(where: { valid.contains($0.id) })?.id
+        if primary != state.selection { select(primary) }
+        selectedPageIDs = valid
+        if hasMultipleSelection { drawingStraightenLine = false }
+    }
     func select(_ id: UUID?) {
+        selectedPageIDs = Set(id.map { [$0] } ?? [])
         drawingStraightenLine = false
         renderTask?.cancel()
         renderTask = nil
@@ -137,7 +165,7 @@ import UniformTypeIdentifiers
     }
     func edit(_ value: PageEdits) {
         drawingStraightenLine = false
-        guard let i = index, value != edits else { return }
+        guard !hasMultipleSelection, let i = index, value != edits else { return }
         let id = state.pages[i].id
         remember(.page(id, edits))
         state.pages[i].edits = value; state.pages[i].hasBeenEdited = true; state.pages[i].reviewed = false
@@ -175,7 +203,7 @@ import UniformTypeIdentifiers
         status = "Page order saved"
     }
     func deletePage() {
-        guard !busy, let i = index else { return }
+        guard !busy, !hasMultipleSelection, let i = index else { return }
         let removed = state.pages.remove(at: i)
         undoActions.removeAll { action in
             if case .page(let id, _) = action { return id == removed.id }
@@ -186,7 +214,7 @@ import UniformTypeIdentifiers
         status = "Deleted \(removed.name) from the library"
     }
     func markNext() {
-        guard !busy, let i = index else { return }
+        guard !busy, !hasMultipleSelection, let i = index else { return }
         state.pages[i].edits = edits; state.pages[i].hasBeenEdited = true
         state.pages[i].reviewed = true
         save()
@@ -284,7 +312,7 @@ import UniformTypeIdentifiers
             let result = await Task.detached(priority: .userInitiated) { Imaging.autoCrop(source, edits: current) }.value
             if state.selection == id, result.found { edit(result.edits) }
             busy = false
-            status = result.found ? "Page edges detected · review the crop before export" : "No clear page edges found · adjust the blue crop lines or edge sliders"
+            status = result.found ? "Page edges detected · review the crop before export" : "No clear page edges found · adjust the crop lines or edge sliders"
         }
     }
     func straightenPage() {

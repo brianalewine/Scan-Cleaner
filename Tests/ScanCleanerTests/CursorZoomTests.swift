@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import ScanTidy
+@testable import ScanCleaner
 
 final class CursorZoomTests: XCTestCase {
     @MainActor func testSharedBackdropFollowsPanAndZoomInWindowCoordinates() async throws {

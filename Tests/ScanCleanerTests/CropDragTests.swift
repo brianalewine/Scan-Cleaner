@@ -1,5 +1,5 @@
 import XCTest
-@testable import ScanTidy
+@testable import ScanCleaner
 
 final class CropDragTests: XCTestCase {
     let size = CGSize(width: 600, height: 800)

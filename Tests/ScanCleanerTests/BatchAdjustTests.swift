@@ -1,5 +1,5 @@
 import XCTest
-@testable import ScanTidy
+@testable import ScanCleaner
 
 final class BatchAdjustTests: XCTestCase {
     @MainActor func testStopBeforeProcessingLeavesPagesUnchanged() async throws {
@@ -7,7 +7,9 @@ final class BatchAdjustTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let library = Library(root: root)
         library.state.pages = [ScanPage(name: "missing.png", storedFile: "missing.png")]
-        let before = try JSONEncoder().encode(library.state.pages)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let before = try encoder.encode(library.state.pages)
         library.straightenAndCropAll()
         XCTAssertTrue(library.batchRunning)
         library.cancelCurrentOperation()
@@ -19,7 +21,7 @@ final class BatchAdjustTests: XCTestCase {
         XCTAssertFalse(library.batchRunning)
         XCTAssertNil(library.error)
         XCTAssertTrue(library.status.hasPrefix("Stopped"))
-        XCTAssertEqual(try JSONEncoder().encode(library.state.pages), before)
+        XCTAssertEqual(try encoder.encode(library.state.pages), before)
     }
 
     @MainActor func testStopDiscardsInFlightPageAndUndoRestoresCompletedPages() async throws {
