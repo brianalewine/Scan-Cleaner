@@ -100,4 +100,25 @@ final class ProjectTests: XCTestCase {
         XCTAssertEqual(Projects(root: root).items.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Originals/scan.png").path))
     }
+    @MainActor func testLibraryNavigationFromPDFExportSavesDetails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projects = Projects(root: root)
+        projects.create(name: "Export project")
+        let id = try XCTUnwrap(projects.activeID)
+        projects.active.state.bookInformation = BookInformation(title: "Saved book")
+        projects.active.showingPDFExport = true
+        projects.active.busy = true
+        projects.showLibrary()
+        XCTAssertFalse(projects.showingLibrary)
+        projects.active.busy = false
+        projects.showLibrary()
+        XCTAssertTrue(projects.showingLibrary)
+        XCTAssertFalse(projects.active.showingPDFExport)
+        projects.open(id)
+        XCTAssertEqual(projects.active.state.bookInformation?.title, "Saved book")
+        XCTAssertFalse(projects.active.showingPDFExport)
+        XCTAssertFalse(Projects(root: root).showingLibrary)
+    }
+
 }

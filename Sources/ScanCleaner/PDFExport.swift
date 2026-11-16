@@ -62,6 +62,37 @@ struct BookInformation: Codable, Equatable {
     var year = ""
     var subject = ""
     var keywords = ""
+    var publisherCity = ""
+    var edition = ""
+    var publicationMonth = ""
+    var publicationDay = ""
+    var publicationDate = ""
+    var coverURL = ""
+    var description = ""
+    var tableOfContents = ""
+    var pageCount = ""
+    var categories = ""
+
+    static let storedFields: [(String, WritableKeyPath<BookInformation, String>)] = [
+        ("isbn", \.isbn), ("title", \.title), ("author", \.author), ("publisher", \.publisher),
+        ("year", \.year), ("subject", \.subject), ("keywords", \.keywords),
+        ("publisherCity", \.publisherCity), ("edition", \.edition), ("publicationMonth", \.publicationMonth),
+        ("publicationDay", \.publicationDay), ("publicationDate", \.publicationDate), ("coverURL", \.coverURL),
+        ("description", \.description), ("tableOfContents", \.tableOfContents), ("pageCount", \.pageCount), ("categories", \.categories)
+    ]
+    private struct FieldKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: FieldKey.self)
+        for (name, key) in Self.storedFields { try values.encode(self[keyPath: key], forKey: FieldKey(stringValue: name)) }
+    }
+    mutating func fillEmptyFields(from result: BookInformation) {
+        for (_, key) in Self.storedFields where self[keyPath: key].isEmpty { self[keyPath: key] = result[keyPath: key] }
+    }
     var fields: [(String, String)] {
         [("Title", title), ("Author", author), ("Publisher", publisher), ("PublicationDate", year),
          ("ISBN", isbn), ("Subject", subject), ("Keywords", keywords)].filter { !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -93,10 +124,79 @@ struct BookInformation: Codable, Equatable {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw PDFExportError.message("Book lookup is unavailable. Try again or enter the details manually.") }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any], let book = json["ISBN:\(isbn)"] as? [String: Any] else { throw PDFExportError.message("No book found for that ISBN. Enter the details manually.") }
-        func names(_ key: String) -> String { (book[key] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }.joined(separator: "; ") }
-        return BookInformation(isbn: isbn, title: book["title"] as? String ?? "", author: names("authors"), publisher: names("publishers"), year: book["publish_date"] as? String ?? "")
+        var result = Self.parseLookup(book, isbn: isbn)
+        // Edition JSON includes fields omitted by the legacy Books API.
+        if let edition = try? await fetchRecord("/isbn/\(isbn).json") {
+            result.fillEmptyFields(from: Self.parseLookup(edition, isbn: isbn))
+            if let key = (edition["works"] as? [[String: Any]])?.first?["key"] as? String,
+               key.range(of: #"^/works/OL[0-9]+W$"#, options: .regularExpression) != nil,
+               let work = try? await fetchRecord(key + ".json") {
+                if result.description.isEmpty { result.description = text(work["description"]) }
+                if result.tableOfContents.isEmpty { result.tableOfContents = contents(work["table_of_contents"]) }
+                if result.categories.isEmpty { result.categories = terms(work["subjects"]) }
+            }
+        }
+        return result
     }
-    static func lookupCatalog(_ value: String) async throws -> (subject: String, keywords: String) {
+    private static func fetchRecord(_ path: String) async throws -> [String: Any] {
+        var request = URLRequest(url: URL(string: "https://openlibrary.org" + path)!)
+        request.timeoutInterval = 20
+        request.setValue("ScanCleaner/1.3 (personal book metadata lookup)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw PDFExportError.message("Additional book details unavailable.") }
+        return record
+    }
+    private static func text(_ value: Any?) -> String {
+        (value as? String) ?? (value as? [String: Any])?["value"] as? String ?? ""
+    }
+    private static func terms(_ value: Any?) -> String {
+        if let strings = value as? [String] { return strings.joined(separator: "; ") }
+        return (value as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }.joined(separator: "; ")
+    }
+    private static func contents(_ value: Any?) -> String {
+        (value as? [[String: Any]] ?? []).compactMap { item in
+            guard let title = item["title"] as? String, !title.isEmpty else { return nil }
+            let label = item["label"] as? String ?? ""
+            let page = item["pagenum"] as? String ?? (item["pagenum"] as? Int).map(String.init) ?? ""
+            let level = max(0, min(10, (item["level"] as? Int ?? 1) - 1))
+            return String(repeating: "  ", count: level) + (label.isEmpty ? "" : label + " ") + title + (page.isEmpty ? "" : " — " + page)
+        }.joined(separator: "\n")
+    }
+    static func parseLookup(_ record: [String: Any], isbn: String) -> BookInformation {
+        var result = BookInformation(isbn: isbn, title: record["title"] as? String ?? "",
+                                     author: terms(record["authors"]), publisher: terms(record["publishers"]))
+        result.publisherCity = terms(record["publish_places"])
+        result.edition = record["edition_name"] as? String ?? ""
+        result.publicationDate = record["publish_date"] as? String ?? ""
+        let date = publicationComponents(result.publicationDate)
+        result.year = date.year; result.publicationMonth = date.month; result.publicationDay = date.day
+        result.description = text(record["description"])
+        result.tableOfContents = contents(record["table_of_contents"])
+        result.pageCount = (record["number_of_pages"] as? Int).map(String.init) ?? ""
+        result.categories = terms(record["subjects"])
+        let cover = record["cover"] as? [String: String] ?? [:]
+        result.coverURL = cover["large"] ?? cover["medium"] ?? cover["small"] ?? ""
+        if result.coverURL.isEmpty, let id = (record["covers"] as? [Int])?.first(where: { $0 > 0 }) {
+            result.coverURL = "https://covers.openlibrary.org/b/id/\(id)-L.jpg"
+        }
+        return result
+    }
+    static func publicationComponents(_ raw: String) -> (year: String, month: String, day: String) {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.range(of: #"^\d{4}$"#, options: .regularExpression) != nil { return (value, "", "") }
+        for format in ["yyyy-MM-dd", "yyyy-MM", "MMMM d, yyyy", "MMM d, yyyy", "d MMMM yyyy", "d MMM yyyy", "MMMM yyyy", "MMM yyyy"] {
+            let parser = DateFormatter()
+            parser.locale = Locale(identifier: "en_US_POSIX"); parser.timeZone = TimeZone(secondsFromGMT: 0)
+            parser.dateFormat = format; parser.isLenient = false
+            guard let date = parser.date(from: value), parser.string(from: date).lowercased() == value.lowercased() else { continue }
+            let calendar = Calendar(identifier: .gregorian)
+            var utc = calendar; utc.timeZone = TimeZone(secondsFromGMT: 0)!
+            return (String(utc.component(.year, from: date)), String(utc.component(.month, from: date)), format.contains("d") ? String(utc.component(.day, from: date)) : "")
+        }
+        return ("", "", "")
+    }
+    static func lookupCatalog(_ value: String) async throws -> BookInformation {
         guard let isbn = normalizedISBN(value) else { throw PDFExportError.message("Enter a valid ISBN-10 or ISBN-13, including its check digit.") }
         var components = URLComponents(string: "https://lx2.loc.gov/sru/lcdb")!
         components.queryItems = [URLQueryItem(name: "version", value: "1.1"),
@@ -110,7 +210,7 @@ struct BookInformation: Codable, Equatable {
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw PDFExportError.message("Library of Congress lookup is unavailable. Try again later.")
         }
-        return (try subjects(from: data), try keywords(from: data))
+        return try parseCatalog(data)
     }
     static func keywords(from data: Data) throws -> String {
         let document = try XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever])
@@ -135,6 +235,13 @@ struct BookInformation: Codable, Equatable {
             if !heading.isEmpty && !headings.contains(heading) { headings.append(heading) }
         }
         return headings.joined(separator: "; ")
+    }
+}
+extension BookInformation {
+    init(from decoder: Decoder) throws {
+        self.init()
+        let values = try decoder.container(keyedBy: FieldKey.self)
+        for (name, key) in Self.storedFields { self[keyPath: key] = try values.decodeIfPresent(String.self, forKey: FieldKey(stringValue: name)) ?? "" }
     }
 }
 enum PDFExportError: LocalizedError {

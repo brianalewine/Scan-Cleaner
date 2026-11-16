@@ -23,6 +23,8 @@ import AppKit
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo Edit") { library.undo() }.keyboardShortcut("z").disabled(library.busy || library.showingPDFExport)
                 Button("Undo Edit (Control-Z)") { library.undo() }.keyboardShortcut("z", modifiers: .control).disabled(library.busy || library.showingPDFExport)
+                Button("Redo Edit") { library.redo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(library.busy || library.showingPDFExport)
+                Button("Redo Edit (Control-Option-Z)") { library.redo() }.keyboardShortcut("z", modifiers: [.control, .option]).disabled(library.busy || library.showingPDFExport)
             }
             CommandGroup(after: .undoRedo) {
                 Button("Mark Done & Next") { library.markNext() }
@@ -202,18 +204,18 @@ struct ContentView: View {
             .disabled(library.busy || !library.state.pages.contains(where: { !$0.reviewed }))
             .padding(.horizontal, 15)
             PageList().environmentObject(library).disabled(library.busy)
-            Button("Delete Page…", systemImage: "trash", role: .destructive) {
+            Button(library.hasMultipleSelection ? "Delete Selected Pages…" : "Delete Page…", systemImage: "trash", role: .destructive) {
                 showingDeleteConfirmation = true
             }
-            .disabled(library.page == nil || library.hasMultipleSelection || library.busy)
+            .disabled(library.selectedPageIDs.isEmpty || library.busy)
             .padding(.horizontal, 15)
-            .alert("Delete this page?", isPresented: $showingDeleteConfirmation) {
+            .alert(library.hasMultipleSelection ? "Delete \(library.selectedPageIDs.count) selected pages?" : "Delete this page?", isPresented: $showingDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
-                Button("Delete Page", role: .destructive) { library.deletePage() }
+                Button(library.hasMultipleSelection ? "Delete Pages" : "Delete Page", role: .destructive) { library.deletePage() }
             } message: {
-                Text("Remove \(library.page?.name ?? "this page") from the library? Your original file stays untouched. You can import it again later.")
+                Text(library.hasMultipleSelection ? "Remove the selected pages from the library? Your original files stay untouched. You can import them again later." : "Remove \(library.page?.name ?? "this page") from the library? Your original file stays untouched. You can import it again later.")
             }
-            Text("Shift-click for a range; Control-click or ⌘-click for individual pages. Drag selected pages to rearrange them.").font(.caption).foregroundStyle(.secondary).padding(15)
+            Text("Shift-click for a range; Control-click or ⌘-click for individual pages. Drag selected pages or hold Control and press ↑/↓ to rearrange them.").font(.caption).foregroundStyle(.secondary).padding(15)
         }
         .scanGlassButtons()
     }
@@ -227,10 +229,25 @@ struct ContentView: View {
             library.editSpine(settings)
         })
     }
-    func cropSlider(_ title: String, _ key: WritableKeyPath<PageEdits, Double>, opposite: Double) -> some View {
-        VStack(spacing: 4) {
-            HStack { Text(title); Spacer(); Text(String(format: "%.1f%%", library.edits[keyPath: key]*100)).monospacedDigit().foregroundStyle(.secondary) }
-            ResettableSlider(value: binding(key), range: 0...min(0.45, 0.95-opposite), step: 0.001, label: "\(title) crop")
+    func cropSlider(_ title: String, _ symbol: String, _ key: WritableKeyPath<PageEdits, Double>, opposite: Double) -> some View {
+        let range = 0...min(0.45, 0.95-opposite)
+        return VStack(spacing: 4) {
+            HStack {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 22, height: 20)
+                    .accessibilityLabel("\(title) crop edge")
+                    .help("\(title) crop edge")
+                Spacer()
+                Stepper(value: binding(key), in: range, step: 0.0001) {
+                    Text(String(format: "%.2f%%", library.edits[keyPath: key]*100))
+                        .monospacedDigit().foregroundStyle(.secondary)
+                }
+                .fixedSize()
+                .accessibilityLabel("\(title) crop fine adjustment")
+                .help("Adjust the \(title.lowercased()) crop by 0.01%; hold to repeat")
+            }
+            ResettableSlider(value: binding(key), range: range, step: 0.0001, label: "\(title) crop")
                 .frame(height: 20)
         }.font(.caption)
     }
@@ -291,11 +308,11 @@ struct ContentView: View {
                     }
                     Button("Auto Detect Page Edges", systemImage: "viewfinder") { library.autoCrop() }
                     Text("Auto crop keeps the current rotation and looks for the page edge inside any visible stack of sheets.").font(.caption).foregroundStyle(.secondary)
-                    Text("Drag an edge or corner to resize the crop. Use these sliders to fine-tune.").font(.caption).foregroundStyle(.secondary)
-                    cropSlider("Left", \.left, opposite: library.edits.right)
-                    cropSlider("Right", \.right, opposite: library.edits.left)
-                    cropSlider("Top", \.top, opposite: library.edits.bottom)
-                    cropSlider("Bottom", \.bottom, opposite: library.edits.top)
+                    Text("Drag an edge or corner to resize the crop. Use the sliders to fine-tune, or the steppers for 0.01% adjustments.").font(.caption).foregroundStyle(.secondary)
+                    cropSlider("Left", "arrow.left.to.line", \.left, opposite: library.edits.right)
+                    cropSlider("Right", "arrow.right.to.line", \.right, opposite: library.edits.left)
+                    cropSlider("Top", "arrow.up.to.line", \.top, opposite: library.edits.bottom)
+                    cropSlider("Bottom", "arrow.down.to.line", \.bottom, opposite: library.edits.top)
                 }.settingsSection()
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Spine shadow", isOn: spineBinding(\.enabled)).font(.headline)
@@ -311,6 +328,8 @@ struct ContentView: View {
                         ResettableSlider(value: spineBinding(\.strength), range: 0...1, step: 0.001, label: "Spine strength", resetValue: SpineSettings().strength)
                             .frame(height: 20)
                     }.disabled(!library.edits.spineSettings.enabled)
+                    Button("Set Default Spine Shadow") { library.setDefaultSpineShadow() }
+                        .help("Apply this width and strength to all pages not marked done, preserving each page’s checkbox and side.")
                     if library.edits.spine == nil && library.edits.shadow > 0 {
                         Text("This page keeps its previous two-sided correction until you change a shadow control.").font(.caption).foregroundStyle(.secondary)
                     }
@@ -329,7 +348,7 @@ struct ContentView: View {
                     }.disabled(library.copied == nil)
                     Text("Odd/even follows the page list order. Batch changes clear done marks.").font(.caption).foregroundStyle(.secondary)
                 }.settingsSection()
-                Text("Double-click a slider to reset it.\n⌘Z undo • ↵ done & next\n⌘← / ⌘→ previous / next").font(.caption).foregroundStyle(.secondary)
+                Text("Double-click a slider to reset it.\nCtrl-Z undo • Ctrl-Alt-Z redo\n↵ done & next\n⌘← / ⌘→ previous / next").font(.caption).foregroundStyle(.secondary)
             }.padding(14)
         }
         // Preserve the automatic toolbar safe-area inset for the first card.

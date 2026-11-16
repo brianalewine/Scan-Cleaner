@@ -164,7 +164,8 @@ struct ProjectStorage {
         return try? JSONDecoder().decode(LibraryState.self, from: data)
     }
     func showLibrary() {
-        guard !locked, save() else { return }
+        guard !active.busy, save() else { return }
+        active.showingPDFExport = false
         showingLibrary = true
     }
     func delete(_ id: UUID) {
@@ -190,7 +191,7 @@ struct ProjectControls: View {
     var body: some View {
         HStack {
             Button("Scan Library", systemImage: "square.grid.2x2") { projects.showLibrary() }
-                .disabled(projects.locked)
+                .disabled(projects.active.busy)
             Button("New Scan Project", systemImage: "plus") { name = ""; creating = true }
                 .labelStyle(.iconOnly).help("Start a new scan project")
                 .disabled(projects.locked)

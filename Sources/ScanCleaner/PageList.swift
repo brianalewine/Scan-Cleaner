@@ -26,6 +26,13 @@ struct PageList: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.documentView = table
         context.coordinator.table = table
+        table.moveSelection = { [weak table, weak coordinator = context.coordinator] direction in
+            guard let coordinator, let table else { return }
+            coordinator.library.moveSelectedPages(by: direction)
+            coordinator.update(coordinator.library)
+            let rows = table.selectedRowIndexes
+            if let row = direction < 0 ? rows.first : rows.last { table.scrollRowToVisible(row) }
+        }
         return scroll
     }
 
@@ -124,6 +131,37 @@ private struct PageListRow: View {
 }
 
 private final class PageTable: NSTableView {
+    var moveSelection: ((Int) -> Void)?
+    private var lastAutoscrollTime: TimeInterval = 0
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+        if modifiers == .control, event.keyCode == 126 || event.keyCode == 125 {
+            moveSelection?(event.keyCode == 126 ? -1 : 1)
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func autoscroll(with event: NSEvent) -> Bool {
+        guard let scroll = enclosingScrollView else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        let visible = visibleRect
+        let edge: CGFloat = 24
+        let direction: CGFloat
+        if point.y < visible.minY + edge { direction = -1 }
+        else if point.y > visible.maxY - edge { direction = 1 }
+        else { lastAutoscrollTime = 0; return false }
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = lastAutoscrollTime == 0 ? 1.0 / 30 : min(now - lastAutoscrollTime, 0.05)
+        lastAutoscrollTime = now
+        let y = min(max(visible.minY + direction * 100 * elapsed, 0), max(0, bounds.height - visible.height))
+        guard y != visible.minY else { return false }
+        scroll.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        return true
+    }
+
     override func mouseDown(with event: NSEvent) {
         // Control-click is an additive selection gesture here, just like Command-click.
         if event.modifierFlags.contains(.control), let mapped = NSEvent.mouseEvent(

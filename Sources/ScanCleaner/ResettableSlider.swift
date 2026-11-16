@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ResettableSlider: View {
+    @EnvironmentObject private var library: Library
     @Binding var value: Double
     let range: ClosedRange<Double>
     let step: Double
@@ -44,9 +45,11 @@ struct ResettableSlider: View {
                 .updating($isDragging) { _, dragging, _ in dragging = isEnabled }
                 .onChanged { event in
                 guard isEnabled else { return }
+                library.beginSliderEdit()
                 let fraction = min(1, max(0, (event.location.x - thumbSize / 2) / travel))
                 setValue(range.lowerBound + fraction * (range.upperBound - range.lowerBound))
             }.onEnded { _ in
+                library.endSliderEdit()
                 hasKeyboardFocus = false
             })
             .simultaneousGesture(TapGesture(count: 2).onEnded {
@@ -55,6 +58,7 @@ struct ResettableSlider: View {
                 hasKeyboardFocus = false
             })
         }
+        .onDisappear { library.endSliderEdit() }
         .opacity(isEnabled ? 1 : 0.35)
         .focusable(isEnabled)
         .focusEffectDisabled()

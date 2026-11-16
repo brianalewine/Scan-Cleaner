@@ -10,7 +10,9 @@ struct PDFExportView: View {
     @State private var estimating = false
     @State private var estimateError: String?
     @State private var lookupBusy = false
+    @State private var lookupTask: Task<Void, Never>?
     @State private var lookupMessage = ""
+    @State private var copiedBookField: String?
     @State private var exportTask: Task<Void, Never>?
     @State private var exportID: UUID?
     @State private var completedPages = 0
@@ -44,16 +46,28 @@ struct PDFExportView: View {
                                 TextField("ISBN", text: $book.isbn)
                                 Button(lookupBusy ? "Looking up…" : "Look Up ISBN") { lookup() }.disabled(lookupBusy || book.isbn.isEmpty)
                             }
-                            Text("Lookup sends only the ISBN to Open Library and the Library of Congress. It fills empty fields; your entries take priority.").font(.caption).foregroundStyle(.secondary)
+                            Text("Lookup sends only the ISBN to Open Library, Google Books, and the Library of Congress. It fills empty fields; your entries take priority.").font(.caption).foregroundStyle(.secondary)
                             if !lookupMessage.isEmpty { Text(lookupMessage).font(.caption) }
-                            TextField("Title", text: $book.title)
-                            TextField("Author(s)", text: $book.author)
-                            TextField("Publisher", text: $book.publisher)
-                            TextField("Publication year / date", text: $book.year)
-                            TextField("Subject", text: $book.subject)
-                            TextField("Keywords", text: $book.keywords)
-                            Text("Subjects use LCSH headings; keywords use published Library of Congress catalog terms (MARC 653), when available. Keywords are not generated.").font(.caption).foregroundStyle(.secondary)
-                            Text("Source metadata is discarded. Only the nonempty book fields above are added. No scanner information, source filenames, author account, software name, or timestamps are written into the PDF. Visible text in the scan is unchanged.").font(.caption).foregroundStyle(.secondary)
+                            Text("Book details · click any value to copy").font(.headline)
+                            copyableBookField("Title", book.title)
+                            copyableBookField("Author name", book.author)
+                            copyableBookField("Publisher", book.publisher)
+                            copyableBookField("Publisher city", book.publisherCity)
+                            copyableBookField("Book edition", book.edition)
+                            copyableBookField("Publication date (as listed)", book.publicationDate)
+                            copyableBookField("Year", book.publicationDate.isEmpty ? book.year : BookInformation.publicationComponents(book.publicationDate).year)
+                            copyableBookField("Month", book.publicationMonth)
+                            copyableBookField("Day", book.publicationDay)
+                            copyableBookField("Front cover image URL", book.coverURL)
+                            copyableBookField("Description", book.description)
+                            copyableBookField("Table of contents", book.tableOfContents)
+                            copyableBookField("Number of pages", book.pageCount)
+                            copyableBookField("Subject categories", book.categories)
+                            copyableBookField("Library of Congress subjects", book.subject)
+                            copyableBookField("Keywords", book.keywords)
+                            Text("Unavailable fields were not supplied by the source. Details combine matching ISBN records from Open Library, Google Books, and the Library of Congress. Open Library descriptions may come from its work record. Additional lookup details are saved with the project for copying.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Source metadata is discarded. Only nonempty title, author, publisher, publication year / date, ISBN, subject, and keywords are added to the PDF. No scanner information, source filenames, author account, software name, or timestamps are written into the PDF. Visible text in the scan is unchanged.").font(.caption).foregroundStyle(.secondary)
                         }.textFieldStyle(.roundedBorder).padding(10)
                     }
                     GroupBox("Searchable text") {
@@ -192,7 +206,7 @@ struct PDFExportView: View {
             if loaded { library.state.pdfSettings = value; library.save() }
         }
         .onChange(of: targetMB) { _, _ in tuning = false }
-        .onDisappear { tuning = false }
+        .onDisappear { tuning = false; lookupTask?.cancel() }
         .onChange(of: book) { _, value in if loaded { library.state.bookInformation = value; library.save() } }
         .task(id: settings) { await estimate() }
         .task(id: tuning) { if tuning { await tunePictures() } }
@@ -232,30 +246,61 @@ struct PDFExportView: View {
             guard !Task.isCancelled else { return }; estimatedBytes = size; estimating = false
         } catch { guard !Task.isCancelled else { return }; estimateError = error.localizedDescription; estimating = false }
     }
+    func copyableBookField(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                if copiedBookField == title { Text("Copied").font(.caption).foregroundStyle(.green) }
+            }
+            if value.isEmpty {
+                Text("Unavailable").font(.callout).foregroundStyle(.secondary)
+            } else {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(value, forType: .string)
+                    copiedBookField = title
+                } label: {
+                    Text(verbatim: value)
+                        .font(.callout)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Click to copy \(title.lowercased())")
+                .accessibilityLabel("Copy \(title): \(value)")
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private func lookupSource(_ source: Int, isbn: String) async -> Result<BookInformation, Error> {
+        do {
+            switch source {
+            case 0: return .success(try await BookInformation.lookup(isbn))
+            case 1: return .success(try await BookInformation.lookupGoogle(isbn))
+            default: return .success(try await BookInformation.lookupCatalog(isbn))
+            }
+        } catch { return .failure(error) }
+    }
     func lookup() {
         lookupBusy = true; lookupMessage = ""
         let isbn = book.isbn
-        Task {
+        lookupTask = Task {
             defer { lookupBusy = false }
-            var messages: [String] = []
-            do {
-                let result = try await BookInformation.lookup(isbn)
-                guard book.isbn == isbn else { lookupMessage = "ISBN changed; look up the new number."; return }
-                if book.title.isEmpty { book.title = result.title }
-                if book.author.isEmpty { book.author = result.author }
-                if book.publisher.isEmpty { book.publisher = result.publisher }
-                if book.year.isEmpty { book.year = result.year }
-                messages.append("Book details: Open Library.")
-            } catch { messages.append("Book details: " + error.localizedDescription) }
+            async let openLibrary = lookupSource(0, isbn: isbn)
+            async let google = lookupSource(1, isbn: isbn)
+            async let catalog = lookupSource(2, isbn: isbn)
+            let results = await [openLibrary, google, catalog]
+            guard !Task.isCancelled else { return }
             guard book.isbn == isbn else { lookupMessage = "ISBN changed; look up the new number."; return }
-            do {
-                let result = try await BookInformation.lookupCatalog(isbn)
-                guard book.isbn == isbn else { lookupMessage = "ISBN changed; look up the new number."; return }
-                if book.subject.isEmpty { book.subject = result.subject }
-                if book.keywords.isEmpty { book.keywords = result.keywords }
-                messages.append(result.subject.isEmpty ? "No LCSH subjects found." : "Subjects: Library of Congress (LCSH).")
-                messages.append(result.keywords.isEmpty ? "No published catalog keywords found." : "Keywords: Library of Congress (MARC 653).")
-            } catch { messages.append("Subjects and keywords: " + error.localizedDescription) }
+            var messages: [String] = []
+            for (source, result) in zip(["Open Library", "Google Books", "Library of Congress"], results) {
+                switch result {
+                case .success(let details):
+                    book.fillEmptyFields(from: details)
+                    messages.append("\(source): lookup complete.")
+                case .failure(let error): messages.append("\(source): \(error.localizedDescription)")
+                }
+            }
             lookupMessage = messages.joined(separator: " ") + " Check the edition before exporting."
         }
     }

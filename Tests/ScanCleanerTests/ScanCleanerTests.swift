@@ -109,31 +109,6 @@ final class ScanCleanerTests: XCTestCase {
         XCTAssertEqual(library.state.pages.first?.id, pages[1].id)
     }
 
-    @MainActor func testDeletePageSelectionAndPersistence() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let library = Library(root: root)
-        let pages = (0..<3).map { ScanPage(name: "\($0).png", storedFile: "\($0).png") }
-        library.state = LibraryState(pages: pages, selection: pages[1].id)
-        library.busy = true
-        library.deletePage()
-        XCTAssertEqual(library.state.pages.count, 3)
-        library.busy = false
-        library.deletePage()
-        XCTAssertEqual(library.state.pages.map(\.id), [pages[0].id, pages[2].id])
-        XCTAssertEqual(library.state.selection, pages[2].id)
-        let reopened = Library(root: root)
-        XCTAssertEqual(reopened.state.pages.map(\.id), [pages[0].id, pages[2].id])
-        XCTAssertEqual(reopened.state.selection, pages[2].id)
-        library.deletePage()
-        XCTAssertEqual(library.state.selection, pages[0].id)
-        library.deletePage()
-        XCTAssertTrue(library.state.pages.isEmpty)
-        XCTAssertNil(library.state.selection)
-        XCTAssertNil(library.preview)
-        library.deletePage() // Empty libraries are safe.
-        XCTAssertTrue(Library(root: root).state.pages.isEmpty)
-    }
-
     func testCropBoundsAndRoundTrip() throws {
         var e = PageEdits()
         e.setCrop(CGRect(x: -0.1, y: 0.1, width: 0.9, height: 0.8))

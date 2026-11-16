@@ -3,59 +3,56 @@ import CoreImage
 @testable import ScanCleaner
 
 final class SpineTests: XCTestCase {
-    @MainActor func testDefaultsOnlyFollowUntouchedPagesAndPersist() throws {
+    @MainActor func testExplicitDefaultsPreserveDonePagesCheckboxAndSide() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let library = Library(root: root)
-        let pages = (0..<4).map { ScanPage(name: "\($0).png", storedFile: "\($0).png") }
-        library.state = LibraryState(pages: pages, selection: pages[0].id)
-        XCTAssertFalse(library.edits.spineSettings.enabled)
-        var crop = library.edits; crop.left = 0.1
-        library.edit(crop) // Even a crop edit protects this page's shadow settings.
-        library.state.selection = pages[1].id
-        var settings = SpineSettings(enabled: true, side: .right, width: 0.18, strength: 0.8)
-        library.editSpine(settings)
-        XCTAssertFalse(library.resolvedEdits(for: library.state.pages[0]).spineSettings.enabled)
-        var inherited = settings; inherited.enabled = false
-        XCTAssertEqual(library.resolvedEdits(for: library.state.pages[2]).spineSettings, inherited)
-        library.state.selection = pages[2].id
-        library.markNext() // A reviewed page also keeps its accepted settings.
-        settings.width = 0.4; settings.side = .left; settings.enabled = false
-        library.editSpine(settings)
-        XCTAssertEqual(library.resolvedEdits(for: library.state.pages[1]).spineSettings.width, 0.18)
-        XCTAssertFalse(library.resolvedEdits(for: library.state.pages[2]).spineSettings.enabled)
-        let newlyImported = ScanPage(name: "new.png", storedFile: "new.png")
-        library.state.pages.append(newlyImported); library.save()
+        var source = ScanPage(name: "source", storedFile: "source")
+        source.edits.spineSettings = SpineSettings(enabled: true, side: .right, width: 0.4, strength: 0.9)
+        var unfinished = ScanPage(name: "unfinished", storedFile: "unfinished")
+        unfinished.edits.left = 0.1
+        unfinished.hasBeenEdited = true
+        var done = unfinished; done.id = UUID(); done.reviewed = true
+        library.state = LibraryState(pages: [source, unfinished, done], selection: source.id)
+        library.setDefaultSpineShadow()
+        let updated = library.resolvedEdits(for: library.state.pages[1])
+        XCTAssertEqual(updated.left, 0.1)
+        XCTAssertEqual(updated.spineSettings.width, 0.4)
+        XCTAssertEqual(updated.spineSettings.strength, 0.9)
+        XCTAssertFalse(updated.spineSettings.enabled)
+        XCTAssertEqual(updated.spineSettings.side, .left)
+        XCTAssertEqual(library.state.pages[2].edits, done.edits)
+        library.undo()
+        XCTAssertNil(library.state.spineDefaults)
+        XCTAssertEqual(library.state.pages[1].edits, unfinished.edits)
+        library.redo()
+        XCTAssertEqual(library.state.pages[1].edits, updated)
         let reopened = Library(root: root)
-        XCTAssertEqual(reopened.resolvedEdits(for: newlyImported).spineSettings, settings)
-        XCTAssertEqual(reopened.state.spineDefaults, settings)
-        XCTAssertEqual(reopened.resolvedEdits(for: reopened.state.pages[1]).spineSettings.side, .right)
+        let imported = ScanPage(name: "new", storedFile: "new")
+        XCTAssertEqual(reopened.resolvedEdits(for: imported).spineSettings.width, 0.4)
+        XCTAssertFalse(reopened.resolvedEdits(for: imported).spineSettings.enabled)
     }
 
-    @MainActor func testDefaultsPreserveBothCheckboxStates() {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let library = Library(root: root)
-        let selected = ScanPage(name: "selected.png", storedFile: "selected.png")
-        var enabled = ScanPage(name: "enabled.png", storedFile: "enabled.png")
-        enabled.edits.spineSettings = SpineSettings(enabled: true)
-        enabled.hasBeenEdited = false
-        let disabled = ScanPage(name: "disabled.png", storedFile: "disabled.png")
-        library.state = LibraryState(pages: [selected, enabled, disabled], selection: selected.id)
-
-        for isEnabled in [true, false] {
-            let settings = SpineSettings(enabled: isEnabled, side: .right, width: 0.4, strength: 0.9)
-            library.editSpine(settings)
-            XCTAssertEqual(library.edits.spineSettings, settings)
-            for (index, expectedEnabled) in [(1, true), (2, false)] {
-                var expected = settings; expected.enabled = expectedEnabled
-                XCTAssertEqual(library.resolvedEdits(for: library.state.pages[index]).spineSettings, expected)
-            }
-            let imported = ScanPage(name: "new.png", storedFile: "new.png")
-            XCTAssertFalse(library.resolvedEdits(for: imported).spineSettings.enabled)
-            library.save()
-            let reopened = Library(root: root)
-            XCTAssertTrue(reopened.resolvedEdits(for: reopened.state.pages[1]).spineSettings.enabled)
-            XCTAssertFalse(reopened.resolvedEdits(for: reopened.state.pages[2]).spineSettings.enabled)
+    @MainActor func testSliderHistoryGroupsUpdatesAndClearsRedoOnNewEdit() {
+        let library = Library(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let page = ScanPage(name: "page", storedFile: "page")
+        library.state = LibraryState(pages: [page], selection: page.id)
+        let original = library.edits
+        library.beginSliderEdit()
+        for angle in [1.0, 2.0, 3.0] {
+            var edits = library.edits; edits.angle = angle; library.edit(edits)
         }
+        library.endSliderEdit()
+        library.undo()
+        XCTAssertEqual(library.edits, original)
+        library.redo()
+        XCTAssertEqual(library.edits.angle, 3)
+        library.undo()
+        var crop = library.edits; crop.left = 0.2; library.edit(crop)
+        library.redo()
+        XCTAssertEqual(library.edits.left, 0.2)
+        XCTAssertEqual(library.edits.angle, 0)
+        library.undo()
+        XCTAssertEqual(library.edits, original)
     }
 
     func testOldLibraryDecodesAndKeepsExistingCorrection() throws {

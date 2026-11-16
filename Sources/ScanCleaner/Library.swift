@@ -24,11 +24,15 @@ import UniformTypeIdentifiers
     private var previewRevision = 0
     private var saveTask: Task<Void, Never>?
     private enum UndoAction {
-        case page(UUID, PageEdits)
         case batch([ScanPage])
+        case spineDefaults([ScanPage], SpineSettings?)
     }
     private var undoActions: [UndoAction] = []
+    private var redoActions: [UndoAction] = []
+    private var sliderSnapshot: ScanPage?
     private func remember(_ action: UndoAction) {
+        guard sliderSnapshot == nil else { return }
+        redoActions.removeAll()
         undoActions.append(action)
         if undoActions.count > 100 { undoActions.removeFirst() }
     }
@@ -46,6 +50,7 @@ import UniformTypeIdentifiers
             var settings = state.spineDefaults ?? SpineSettings()
             // Defaults share adjustment values; the checkbox belongs to each page.
             settings.enabled = page.edits.spineSettings.enabled
+            settings.side = page.edits.spineSettings.side
             value.spineSettings = settings
         }
         return value
@@ -70,8 +75,6 @@ import UniformTypeIdentifiers
         var value = edits
         value.spineSettings = settings
         edit(value)
-        state.spineDefaults = settings
-        scheduleSave()
     }
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Scan Cleaner", isDirectory: true)
@@ -126,6 +129,7 @@ import UniformTypeIdentifiers
         if hasMultipleSelection { drawingStraightenLine = false }
     }
     func select(_ id: UUID?) {
+        endSliderEdit()
         selectedPageIDs = Set(id.map { [$0] } ?? [])
         drawingStraightenLine = false
         renderTask?.cancel()
@@ -166,28 +170,73 @@ import UniformTypeIdentifiers
     func edit(_ value: PageEdits) {
         drawingStraightenLine = false
         guard !hasMultipleSelection, let i = index, value != edits else { return }
-        let id = state.pages[i].id
-        remember(.page(id, edits))
+        remember(.batch([state.pages[i]]))
         state.pages[i].edits = value; state.pages[i].hasBeenEdited = true; state.pages[i].reviewed = false
         scheduleSave(); refresh()
     }
-    func undo() {
-        guard !busy, let action = undoActions.popLast() else { return }
+    func beginSliderEdit() {
+        guard sliderSnapshot == nil, let page else { return }
+        sliderSnapshot = page
+    }
+    func endSliderEdit() {
+        guard let snapshot = sliderSnapshot else { return }
+        sliderSnapshot = nil
+        guard let current = state.pages.first(where: { $0.id == snapshot.id }),
+              current.edits != snapshot.edits else { return }
+        remember(.batch([snapshot]))
+    }
+    func setDefaultSpineShadow() {
+        guard !busy, page != nil else { return }
+        endSliderEdit()
+        let settings = edits.spineSettings
+        let snapshots = state.pages.filter { !$0.reviewed }
+        remember(.spineDefaults(snapshots, state.spineDefaults))
+        var defaults = state.spineDefaults ?? SpineSettings()
+        defaults.width = settings.width
+        defaults.strength = settings.strength
+        for i in state.pages.indices where !state.pages[i].reviewed {
+            var value = resolvedEdits(for: state.pages[i])
+            var spine = value.spineSettings
+            spine.width = settings.width
+            spine.strength = settings.strength
+            value.spineSettings = spine
+            state.pages[i].edits = value
+        }
+        state.spineDefaults = defaults
+        save(); refresh()
+        status = "Default spine width and strength applied to unfinished pages"
+    }
+    private func restore(_ action: UndoAction) -> UndoAction {
         switch action {
-        case .page(let id, let edits):
-            if let i = state.pages.firstIndex(where: { $0.id == id }) {
-                state.pages[i].edits = edits
-                state.pages[i].reviewed = false
-            }
-        case .batch(let snapshots):
+        case .batch(let snapshots), .spineDefaults(let snapshots, _):
+            let ids = Set(snapshots.map(\.id))
+            let inverse = state.pages.filter { ids.contains($0.id) }
+            let defaults = state.spineDefaults
             for snapshot in snapshots {
                 guard let i = state.pages.firstIndex(where: { $0.id == snapshot.id }) else { continue }
                 state.pages[i].edits = snapshot.edits
                 state.pages[i].reviewed = snapshot.reviewed
                 state.pages[i].hasBeenEdited = snapshot.hasBeenEdited
             }
-            status = "Undid straighten and crop for all affected pages"
+            if case .spineDefaults(_, let previous) = action {
+                state.spineDefaults = previous
+                return .spineDefaults(inverse, defaults)
+            }
+            return .batch(inverse)
         }
+    }
+    func undo() {
+        guard !busy else { return }
+        endSliderEdit()
+        guard let action = undoActions.popLast() else { return }
+        redoActions.append(restore(action))
+        save(); refresh()
+    }
+    func redo() {
+        guard !busy else { return }
+        endSliderEdit()
+        guard let action = redoActions.popLast() else { return }
+        undoActions.append(restore(action))
         save(); refresh()
     }
     func next(_ offset: Int) {
@@ -202,16 +251,33 @@ import UniformTypeIdentifiers
         save()
         status = "Page order saved"
     }
-    func deletePage() {
-        guard !busy, !hasMultipleSelection, let i = index else { return }
-        let removed = state.pages.remove(at: i)
-        undoActions.removeAll { action in
-            if case .page(let id, _) = action { return id == removed.id }
-            return false
+    func moveSelectedPages(by direction: Int) {
+        guard !busy, direction == -1 || direction == 1 else { return }
+        let indices = state.pages.indices.filter { selectedPageIDs.contains(state.pages[$0].id) }
+        guard let first = indices.first, let last = indices.last,
+              direction < 0 ? first > 0 : last < state.pages.count - 1 else { return }
+        // Traverse toward the movement direction so each selected run moves one row.
+        for i in direction < 0 ? indices : indices.reversed() {
+            state.pages.swapAt(i, i + direction)
         }
-        let nextID = state.pages.isEmpty ? nil : state.pages[min(i, state.pages.count - 1)].id
+        save()
+        status = "Page order saved"
+    }
+    func deletePage() {
+        guard !busy, let first = state.pages.firstIndex(where: { selectedPageIDs.contains($0.id) }) else { return }
+        let removed = state.pages.filter { selectedPageIDs.contains($0.id) }
+        let removedIDs = Set(removed.map(\.id))
+        state.pages.removeAll { removedIDs.contains($0.id) }
+        redoActions.removeAll()
+        undoActions.removeAll { action in
+            switch action {
+            case .batch(let pages): return pages.allSatisfy { removedIDs.contains($0.id) }
+            case .spineDefaults: return false
+            }
+        }
+        let nextID = state.pages.isEmpty ? nil : state.pages[min(first, state.pages.count - 1)].id
         select(nextID)
-        status = "Deleted \(removed.name) from the library"
+        status = removed.count == 1 ? "Deleted \(removed[0].name) from the library" : "Deleted \(removed.count) pages from the library"
     }
     func markNext() {
         guard !busy, !hasMultipleSelection, let i = index else { return }
@@ -407,8 +473,10 @@ import UniformTypeIdentifiers
     }
     func applyCopied(_ parity: Bool) {
         guard let copied, let i = index else { return }
-        for n in state.pages.indices where n != i && (!parity || n % 2 == i % 2) {
-            remember(.page(state.pages[n].id, resolvedEdits(for: state.pages[n])))
+        let targets = state.pages.indices.filter { $0 != i && (!parity || $0 % 2 == i % 2) }
+        guard !targets.isEmpty else { return }
+        remember(.batch(targets.map { state.pages[$0] }))
+        for n in targets {
             state.pages[n].hasBeenEdited = true; state.pages[n].edits = copied; state.pages[n].reviewed = false
         }
         save(); refresh(); status = parity ? "Settings applied to matching odd/even pages" : "Settings applied to all pages"
