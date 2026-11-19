@@ -17,8 +17,8 @@ Requires an Apple silicon Mac (M1 or later) running macOS 14 or later.
 
 ### Download the app
 
-1. Open the [latest release](https://github.com/brianalewine/Scan-Cleaner/releases/latest) and download **Scan-Cleaner-1.3-macOS-arm64.zip** under **Assets**. The source-code archives do not contain the built app.
-2. Double-click the ZIP to extract it, then drag **Scan Cleaner.app** into **Applications**.
+1. Open the [latest release](https://github.com/brianalewine/Scan-Cleaner/releases/latest) and download **Scan-Cleaner-1.3-macOS-arm64.dmg** under **Assets**. The source-code archives do not contain the built app.
+2. Open the DMG and drag **Scan Cleaner.app** onto **Applications**, then eject the disk image. Alternatively, download the ZIP, double-click to extract it, and drag the standalone app into Applications.
 3. Open **Scan Cleaner** from Applications.
 
 The app is ad-hoc signed and is not notarized by Apple. If macOS blocks the first launch, open **System Settings → Privacy & Security**, scroll to the message about Scan Cleaner, click **Open Anyway**, and confirm **Open**. You may need to try opening the app once before this option appears.

@@ -15,4 +15,7 @@ ditto -c -k --sequesterRsrc --keepParent "$STAGING/Scan Cleaner.app" "$ARCHIVE"
 # Include the installation guide alongside the app in the download.
 (cd "$STAGING" && /usr/bin/zip -q "$ARCHIVE" README.md)
 (cd dist && shasum -a 256 "Scan-Cleaner-${VERSION}-macOS-${ARCH}.zip" > "Scan-Cleaner-${VERSION}-macOS-${ARCH}.zip.sha256")
+ln -s /Applications "$STAGING/Applications"
+hdiutil create -volname "Scan Cleaner" -srcfolder "$STAGING" -ov -format UDZO "dist/Scan-Cleaner-${VERSION}-macOS-${ARCH}.dmg"
+(cd dist && shasum -a 256 "Scan-Cleaner-${VERSION}-macOS-${ARCH}.dmg" > "Scan-Cleaner-${VERSION}-macOS-${ARCH}.dmg.sha256")
 echo "Packaged dist/Scan-Cleaner-${VERSION}-macOS-${ARCH}.zip"
